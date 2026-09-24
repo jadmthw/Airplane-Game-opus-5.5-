@@ -36,7 +36,7 @@
   var FLAP = [0.58, 2.33], AIL = [2.47, 4.17];
   var STAB = { y: 0.15, rootLE: 3.15, rootTE: 4.05, tipX: 1.55, tipLE: 3.5, tipTE: 3.95, t: 0.07, hingeZ: 3.75 };
   var FIN = { rootY: 0.12, topY: 1.42, rootLE: 3.0, rootTE: 4.1, topLE: 3.62, topTE: 4.05, t: 0.09, hingeZ: 3.74, rudderY0: 0.3 };
-  var PROP_Z = -3.30, PROP_R = 0.88;
+  var PROP_Z = -3.30, PROP_R = 0.88, PROP_SOLID_RPM = 0.45;
   var MAIN_PIVOT = [1.3, -0.42, 0.28], NOSE_PIVOT = [0, -0.45, -2.3];
   var MAIN_WHEEL_R = 0.27, NOSE_WHEEL_R = 0.24;
   var GEAR_H = 1.45;
@@ -103,7 +103,7 @@
   // NACA-style half thickness (max 0.5 at ~30% chord), closed trailing edge.
   function halfT(u) {
     u = M.clamp(u, 0, 1);
-    return 5 * (0.2969 * Math.sqrt(u) - 0.126 * u - 0.3516 * u * u + 0.2843 * u * u * u - 0.1036 * u * u * u * u) * 0.5 / 0.5;
+    return 5 * (0.2969 * Math.sqrt(u) - 0.126 * u - 0.3516 * u * u + 0.2843 * u * u * u - 0.1036 * u * u * u * u);
   }
 
   /**
@@ -268,10 +268,10 @@
   function buildCanopyFrame() {
     var g = newGeo();
     // windscreen bow and rear hoop: thin tori squashed onto the bubble's cross-section
-    var hoops = [-0.62, 0.52];
+    var hoops = [-0.92, 0.55];
     for (var i = 0; i < hoops.length; i++) {
       var z = hoops[i], f = Math.sqrt(Math.max(0, 1 - Math.pow((z - CANOPY.z) / CANOPY.rz, 2)));
-      var t = RL.Geo.torus(1, 0.035, 4, 18, COL.navy);
+      var t = RL.Geo.torus(1, 0.028, 4, 18, COL.navy);
       RL.Geo.scale(t, CANOPY.rx * f + 0.01, CANOPY.ry * f + 0.01, 1);
       RL.Geo.translate(t, 0, CANOPY.y, z);
       append(g, flat(t, COL.navy, 0));
@@ -285,7 +285,7 @@
     return g;
   }
 
-  var CANOPY = { y: 0.4, z: -0.05, rx: 0.42, ry: 0.5, rz: 1.05 };
+  var CANOPY = { y: 0.4, z: -0.05, rx: 0.42, ry: 0.56, rz: 1.05 };
   function buildCanopyGlass() {
     var prof = [[1.0, 0.0], [0.97, 0.25], [0.87, 0.5], [0.66, 0.75], [0.38, 0.93], [0.001, 1.0]];
     var g = RL.Geo.lathe(prof, 20, [0.6, 0.75, 0.9]);
@@ -314,19 +314,24 @@
   }
 
   function buildPanel() {
+    // cockpit-view only: dark tub over the fuselage skin, glare shield, instrument panel
     var g = newGeo();
-    var glare = RL.Geo.box(0.74, 0.05, 0.3, COL.panel);
-    RL.Geo.translate(glare, 0, 0.6, -0.66);
+    var tub = RL.Geo.box(0.7, 0.06, 1.25, [0.16, 0.16, 0.18]);
+    RL.Geo.translate(tub, 0, 0.555, 0.08);
+    append(g, flat(tub, [0.16, 0.16, 0.18], 0));
+    var glare = RL.Geo.box(0.7, 0.05, 0.26, COL.panel);
+    RL.Geo.translate(glare, 0, 0.59, -0.66);
     append(g, flat(glare, COL.panel, 0));
-    var face = RL.Geo.box(0.72, 0.24, 0.04, COL.panel);
-    RL.Geo.translate(face, 0, 0.46, -0.52);
+    var face = RL.Geo.box(0.68, 0.2, 0.04, COL.panel);
+    RL.Geo.translate(face, 0, 0.49, -0.55);
     append(g, flat(face, COL.panel, 0));
-    var dials = [[-0.22, 0.51], [-0.08, 0.51], [0.06, 0.51], [0.2, 0.51], [-0.15, 0.405], [0.0, 0.405], [0.14, 0.405]];
+    var dials = [[-0.22, 0.53], [-0.075, 0.53], [0.075, 0.53], [0.22, 0.53], [-0.15, 0.43], [0.0, 0.43], [0.15, 0.43]];
     for (var i = 0; i < dials.length; i++) {
-      var d = RL.Geo.cylinder(0.05, 0.05, 0.02, 12, COL.panel);
+      var d = RL.Geo.cylinder(0.052, 0.052, 0.02, 14, COL.panel);
       RL.Geo.rotateX(d, Math.PI / 2);
-      RL.Geo.translate(d, dials[i][0], dials[i][1], -0.495);
-      append(g, flat(d, [0.9, 0.9, 0.85], 8));
+      RL.Geo.translate(d, dials[i][0], dials[i][1], -0.525);
+      // dial centre encoded in the vertex colour (the shader draws the face procedurally)
+      append(g, flat(d, [dials[i][0] + 0.5, dials[i][1], i / 8], 8));
     }
     return g;
   }
@@ -384,11 +389,13 @@
     return parts;
   }
 
+  function buildSpinner() {
+    // swirl painted in the shader; spins with the prop
+    return latheZ([[0.21, 3.22], [0.2, 3.3], [0.16, 3.42], [0.09, 3.51], [0.001, 3.56]], 12, [1, 1, 1], 5);
+  }
+
   function buildProp(bent) {
     var g = newGeo();
-    // spinner (swirl painted in the shader)
-    var sp = latheZ([[0.21, 3.22], [0.2, 3.3], [0.16, 3.42], [0.09, 3.51], [0.001, 3.56]], 12, [1, 1, 1], 5);
-    append(g, sp);
     // two twisted, tapered blades
     for (var b = 0; b < 2; b++) {
       var secs = [], rs = [0.16, 0.45, 0.75, PROP_R];
@@ -439,12 +446,12 @@
     RL.Geo.translate(stub, px + (isNose ? 0 : -side * 0.05), axleY, pz);
     append(leg, flat(stub, COL.metal, 9));
     // gear door (colored, rides with the leg)
-    var door = RL.Geo.box(0.03, len * 0.8, 0.34, COL.cream);
-    RL.Geo.translate(door, px + (isNose ? 0.12 : side * 0.08), py - len * 0.42, pz);
+    var door = RL.Geo.box(0.025, len * 0.55, 0.22, COL.cream);
+    RL.Geo.translate(door, px + (isNose ? 0.1 : side * 0.07), py - len * 0.3, pz);
     append(leg, flat(door, COL.cream, 2));
     if (isNose) {
       var door2 = RL.Geo.clone(door);
-      RL.Geo.translate(door2, -0.24, 0, 0);
+      RL.Geo.translate(door2, -0.2, 0, 0);
       append(leg, door2);
     }
     // wheel: tyre + hub, axis along X
@@ -503,7 +510,7 @@
     // 3x5 pixel font: R L - 2 6
     'int glyph(int c) {',
     '  if (c == 0) return 27565; if (c == 1) return 18727; if (c == 2) return 448;',
-    '  if (c == 3) return 29671; return 31215;',
+    '  if (c == 3) return 29671; return 14831;',
     '}',
     // p: text-space (x in pixel columns, y in rows from the top); chars from `first`, `count` long
     'float textMask(vec2 p, int first, int count) {',
@@ -547,11 +554,12 @@
     '    c = CREAM;',
     '    float t = clamp((P.z + 1.9) / 6.0, 0.0, 1.0);',
     '    float yc = -0.06 + 0.3 * t * t;',
-    '    float hw = mix(0.2, 0.025, t);',
+    '    float hw = mix(0.13, 0.022, t);',
     '    float side = smoothstep(0.25, 0.45, abs(N.x));',
     '    c = mix(c, RED, band(P.y - yc, -hw, hw) * side);',
     '    c = mix(c, ORANGE, band(P.y - yc, hw + 0.03, hw + 0.065) * side);',
     '    c = mix(c, RED, band(ax, 0.0, 0.07) * step(0.35, P.y) * step(0.9, P.z));',
+    '    c = mix(c, NAVY, (1.0 - aa(0.2 + 0.06 * clamp(-P.z - 0.9, 0.0, 1.0), ax)) * step(0.3, P.y) * band(-P.z, 0.85, 1.9));',
     '    c = mix(c, vec3(0.78, 0.8, 0.82), smoothstep(-0.55, -0.8, N.y) * step(P.y, -0.2));',
     '  } else if (m == 3) {',                            // cowling
     '    c = RED;',
@@ -565,8 +573,8 @@
     '      c = mix(c, RED, rays(vec2(d.x, d.y), 0.24, 0.3, 1.45));',
     '      c = mix(c, RED, aa(1.18, P.y));',
     '      c = mix(c, ORANGE, band(P.y, 1.1, 1.16));',
-    '      float tz = N.x > 0.0 ? (4.02 - P.z) : (P.z - 3.3);',
-    '      c = mix(c, NAVY, textMask(vec2(tz / 0.1, (0.98 - P.y) / 0.1), 3, 2));',
+    '      float tz = N.x > 0.0 ? (3.98 - P.z) : (P.z - 3.43);',
+    '      c = mix(c, NAVY, textMask(vec2(tz / 0.075, (0.9 - P.y) / 0.075), 3, 2));',
     '    } else {',
     '      c = mix(c, RED, aa(1.2, ax));',
     '      c = mix(c, ORANGE, band(ax, 1.12, 1.18));',
@@ -583,11 +591,20 @@
     '    spec = 0.3;',
     '  } else if (m == 7) {',                            // tyres
     '    spec = 0.05;',
-    '  } else if (m == 8) {',                            // instrument dials
-    '    vec2 q = fract(vec2(P.x, P.y) * 0.0);',
-    '    c = vec3(0.05);',
-    '    emis = 1.0;',
-    '  } else if (m == 9) {',                            // metal
+    '  } else if (m == 8) {',                            // instrument dials (centre in base.xy)
+    '    vec2 d = P.xy - vec2(base.x - 0.5, base.y);',
+    '    float r = length(d) / 0.052;',
+    '    float ang = atan(d.x, d.y);',
+    '    float needleA = (base.z * 8.0 * 1.7 + 0.6) + 0.35 * sin(u_time * (0.3 + base.z));',
+    '    float nd = abs(sin(ang - needleA)) * r;',
+    '    float needle = (1.0 - aa(0.07, nd)) * step(cos(ang - needleA), 0.0) * (1.0 - aa(0.85, r));',
+    '    float ticks = band(r, 0.7, 0.86) * aa(0.8, abs(cos(ang * 6.0)));',
+    '    float rim = band(r, 0.9, 1.0);',
+    '    c = vec3(0.03, 0.035, 0.04);',
+    '    c = mix(c, vec3(0.85, 0.85, 0.8), max(ticks, rim));',
+    '    c = mix(c, vec3(1.0, 0.55, 0.15), needle);',
+    '    spec = 0.6; emis = max(ticks, needle);',
+'  } else if (m == 9) {',                            // metal
     '    spec = 0.8;',
     '  }',
     '  return c;',
@@ -609,11 +626,8 @@
     '  vec3 V = normalize(u_camPos - v_world);',
     '  float fr = pow(1.0 - max(dot(N, V), 0.0), 4.0);',
     '  col += skyColor(reflect(-V, N)) * fr * spec * 0.35 * (1.0 - u_char);',
-    '  if (emis > 0.0) {',
-    '    // instrument faces: dark dial, pale ring, a needle; faintly lit at night',
-    '    vec2 q = v_local.xy;',
-    '    col += vec3(0.4, 0.9, 0.6) * 0.08 * u_nightFactor;',
-    '  }',
+    '  // instrument markings glow softly at night',
+    '  col += vec3(0.5, 1.0, 0.7) * emis * 0.25 * u_nightFactor;',
     '  col = applyFog(col, v_world);',
     '  outColor = vec4(finalColor(col), 1.0);',
     '}'
@@ -722,16 +736,18 @@
   var planeM = m4.create();
   var mats = {};
   var casters = [];
-  var propAngle = 0, wheelSpin = [0, 0, 0], lastTime = -1, strobeT = 0;
+  var propAngle = 0, wheelSpin = [0, 0, 0], lastTime = -1;
   var glowData = new Float32Array(8 * 12), glowMesh = null;
   var landing = { pos: v3.create(), dir: v3.create(), intensity: 0 };
   var UNIFORM_MODEL = 'u_model';
+  var NO_SURFACES = { aileron: 0, elevator: 0, rudder: 0 };
+  var GEAR_NAMES = ['nose', 'left', 'right'], GEAR_LEG = ['noseLeg', 'leftLeg', 'rightLeg'],
+    GEAR_WHEEL = ['noseWheel', 'leftWheel', 'rightWheel'];
   var tmpM = m4.create(), tmpR = m4.create(), tmpV = v3.create();
 
   var Aircraft = {
     /** Model-space pilot eye point (inside the canopy, just above the glare shield). */
-    cockpitOffset: v3.create(0, 0.76, 0.12),
-    ready: false
+    cockpitOffset: v3.create(0, 0.88, 0.12)
   };
 
   function mk(name, geo) {
@@ -758,6 +774,7 @@
     mk('pilot', buildPilot());
     mk('panel', buildPanel());
     mk('canopy', buildCanopyGlass());
+    mk('spinner', buildSpinner());
     mk('prop', buildProp(false));
     mk('propBent', buildProp(true));
     mk('disc', buildDisc());
@@ -779,12 +796,11 @@
         attribs: [{ loc: 4, size: 4, offset: 0 }, { loc: 5, size: 4, offset: 4 }], count: 0 }
     });
     // shadow caster list (fixed objects, matrices updated in place)
-    ['body', 'flapL', 'flapR', 'ailL', 'ailR', 'elevator', 'rudder', 'canopy', 'prop',
+    ['body', 'flapL', 'flapR', 'ailL', 'ailR', 'elevator', 'rudder', 'canopy', 'spinner', 'prop',
       'noseLeg', 'noseWheel', 'leftLeg', 'leftWheel', 'rightLeg', 'rightWheel'].forEach(function (k) {
-      casters.push({ mesh: meshes[k], model: mats[k], name: k });
+      casters.push({ mesh: meshes[k], model: mats[k], name: k, gear: /Leg|Wheel/.test(k) });
     });
     ready = true;
-    Aircraft.ready = true;
   };
 
   // ------------------------------------------------------------------ pose
@@ -813,7 +829,7 @@
     m4.copy(mats.panel, planeM);
     m4.copy(mats.canopy, planeM);
     m4.copy(mats.disc, planeM);
-    var sf = plane.surfaces || { aileron: 0, elevator: 0, rudder: 0 };
+    var sf = plane.surfaces || NO_SURFACES;
     var fl = (plane.flaps || 0) * FLAP_MAX;
     m4.multiply(mats.flapL, planeM, hinge(tmpM, parts.flapL.pivot, parts.flapL.axis, fl));
     m4.multiply(mats.flapR, planeM, hinge(tmpM, parts.flapR.pivot, parts.flapR.axis, fl));
@@ -826,15 +842,15 @@
     if (dtGame > 0 && !plane.crashed) propAngle = (propAngle + plane.rpm * 60 * dtGame) % (Math.PI * 2);
     m4.multiply(mats.prop, planeM, hinge(tmpM, PROP_HUB, AX_Z, -propAngle));
     m4.copy(mats.propBent, mats.prop);
+    m4.copy(mats.spinner, mats.prop);
 
     // gear: retract inward (mains) / aft (nose), compress with the suspension, wheels spin
     var g = M.saturate(plane.gear === undefined ? 1 : plane.gear);
     var retract = 1 - M.smoothstep(0, 1, g);
-    var comp = plane.gearCompression || [0, 0, 0];
-    var names = ['nose', 'left', 'right'];
+    var comp = plane.gearCompression || ZERO3;
     for (var i = 0; i < 3; i++) {
-      var gp = gearParts[names[i]];
-      var legM = mats[names[i] + 'Leg'], wheelM = mats[names[i] + 'Wheel'];
+      var gp = gearParts[GEAR_NAMES[i]];
+      var legM = mats[GEAR_LEG[i]], wheelM = mats[GEAR_WHEEL[i]];
       var ang = i === 0 ? -retract * 95 * DEG : (i === 1 ? 1 : -1) * retract * 88 * DEG;
       hinge(legM, gp.pivot, i === 0 ? AX_X : AX_Z, ang);
       m4.copy(tmpM, legM);
@@ -860,7 +876,7 @@
       m4.multiply(wheelM, planeM, tmpM);
     }
   }
-  var compV = [0, 0, 0];
+  var compV = [0, 0, 0], ZERO3 = [0, 0, 0];
 
   function gameDt(frame) {
     var t = frame && typeof frame.time === 'number' ? frame.time : 0;
@@ -890,14 +906,11 @@
     drawPart('elevator'); drawPart('rudder');
     if (!opts.cockpit) drawPart('pilot');
     else drawPart('panel');
-    // solid blades while they can be seen turning; a blur disc (transparent pass) above that
+    // solid blades while they can be seen turning; above that only the blur disc (drawn in the
+    // transparent pass) represents them
+    drawPart('spinner');
     if (crashed) drawPart('propBent');
-    else if (plane.rpm < 0.42) drawPart('prop');
-    else {
-      // spinner only (blades are a blur): draw the prop mesh anyway at low alpha? spinner is part of
-      // the prop mesh, so draw it: fast blades read as the disc drawn later over them.
-      drawPart('prop');
-    }
+    else if (plane.rpm < PROP_SOLID_RPM) drawPart('prop');
     var g = plane.gear === undefined ? 1 : plane.gear;
     if (g > 0.01) {
       drawPart('noseLeg'); drawPart('noseWheel');
@@ -924,7 +937,7 @@
     G.drawMesh(gl, meshes.canopy);
 
     // propeller blur disc
-    var rpmVis = crashed ? 0 : M.smoothstep(0.28, 0.6, plane.rpm);
+    var rpmVis = crashed ? 0 : M.smoothstep(0.3, PROP_SOLID_RPM + 0.05, plane.rpm);
     if (rpmVis > 0.01) {
       gl.disable(gl.CULL_FACE);
       G.use(gl, progDisc, null);
@@ -1006,8 +1019,8 @@
     out.length = 0;
     for (var i = 0; i < casters.length; i++) {
       var c = casters[i];
-      if (g < 0.02 && /Leg|Wheel/.test(c.name)) continue;
-      if (c.name === 'prop' && plane.rpm > 0.42 && !plane.crashed) continue;
+      if (g < 0.02 && c.gear) continue;
+      if (c.name === 'prop' && plane.rpm >= PROP_SOLID_RPM && !plane.crashed) continue;
       out.push(c);
     }
     return out;

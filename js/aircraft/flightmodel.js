@@ -12,9 +12,11 @@
  * Model: rigid body with forces in newtons (lift/drag/side force from the air-relative velocity,
  * prop thrust, gravity, per-wheel spring-damper ground contacts) and rotational dynamics written
  * as body-axis angular accelerations (aero) plus contact torques / inertia. The aero moments are
- * shaped for game feel: the elevator commands an angle of attack (stick position ~ AoA, like a
- * real stable aeroplane), ailerons command a roll rate proportional to airspeed, and the rudder
- * fights a strong weathervane with a little automatic turn coordination.
+ * shaped for game feel: the elevator adds angle of attack on top of a light stability
+ * augmentation that holds the flight path with the stick centred (bank compensated, gentle
+ * return toward level, fading out near the stall and with flaps); ailerons command a roll rate
+ * proportional to airspeed; rudder vs. a strong weathervane. Damping acts relative to the
+ * rotation of the flight path, so steady turns and loops aren't resisted and banks persist.
  *
  * Body axes: nose = -Z, right wing = +X, up = +Y. angVel = [pitch up, yaw LEFT, roll LEFT] rad/s.
  * Controls: pitch + = nose up, roll + = roll right, yaw + = nose right.
@@ -44,7 +46,7 @@
     idleRpm: 0.2, propDisk: 2.54, propWash: 0.7,
     // rotational "feel" constants (angular accelerations at the reference dynamic pressure)
     vRef: 55,
-    kElev: 5.6, kAlpha: 16.0, alphaTrim: 1.5 * DEG, dampPitch0: 0.5, dampPitch: 3.0, pathReturn: 2.5, holdFlaps: 0.85,
+    kElev: 4.2, kAlpha: 16.0, alphaTrim: 1.5 * DEG, dampPitch0: 0.5, dampPitch: 3.0, pathReturn: 2.5, holdFlaps: 0.85,
     stallPitch: 2.6,
     kAil: 15.3, dampRoll0: 0.4, dampRoll: 5.5, kDihedral: 4.0,
     kRud: 2.2, kBeta: 7.0, dampYaw0: 0.5, dampYaw: 2.5,
@@ -76,7 +78,7 @@
     { name: 'bellyR', p: [0, -0.28, 1.9], reason: 'belly' },
     { name: 'tail', p: [0, 0.02, 3.95], reason: 'tail' },
     { name: 'fin', p: [0, 1.4, 3.95], reason: 'terrain' },
-    { name: 'canopy', p: [0, 0.95, -0.1], reason: 'terrain' },
+    { name: 'canopy', p: [0, 0.96, -0.1], reason: 'terrain' },
     { name: 'stabL', p: [-1.55, 0.15, 3.75], reason: 'wingStrike' },
     { name: 'stabR', p: [1.55, 0.15, 3.75], reason: 'wingStrike' }
   ];
@@ -124,7 +126,6 @@
   var force = v3.create(), torque = v3.create(), angAcc = v3.create();
   var liftDir = v3.create(), nrm = v3.create(), wp = v3.create(), rel = v3.create();
   var fwdG = v3.create(), latG = v3.create(), vPt = v3.create(), fC = v3.create(), fB = v3.create();
-  var velBefore = v3.create();
   var clOut = { stall: 0, aS: 0 };
   var NO_EVENTS = [], evBuf = [];
 
@@ -405,10 +406,10 @@
     // holds its flight path with a gentle return toward level (bank compensated, so banked turns
     // hold altitude); a steady stick holds a steady climb angle. The hold fades out approaching
     // the stall, so a slow aeroplane lowers its nose toward trim by itself.
-    var aNeutral = P.alphaTrim;
+    var aNeutral = P.alphaTrim, hold = 0;
     if (airborne && V > 5) {
       var vsNow = M.lerp(specs.vStall, specs.vStallFlaps, p.flaps);
-      var hold = M.smoothstep(1.12 * vsNow, 1.45 * vsNow, V) * (1 - P.holdFlaps * p.flaps);
+      hold = M.smoothstep(1.12 * vsNow, 1.45 * vsNow, V) * (1 - P.holdFlaps * p.flaps);
       if (hold > 0) {
         var sg = M.clamp(air[1] / V, -1, 1), cg = Math.sqrt(1 - sg * sg);
         var cphi = M.clamp(p.up[1] / Math.max(0.2, Math.sqrt(Math.max(0, 1 - p.forward[1] * p.forward[1]))), -1, 1);
@@ -419,9 +420,19 @@
         aNeutral += hold * (aHold - P.alphaTrim);
       }
     }
-    angAcc[0] = qnT * P.kElev * el + qn * P.kAlpha * (aNeutral - sa) -
+    // Full stick at speed stops just short of the critical AoA; slow (hold faded) it reaches past
+    // it, so the aeroplane can still be stalled deliberately.
+    var elevGain = airborne ? 1 + 0.4 * (1 - hold) : 1;
+    angAcc[0] = qnT * P.kElev * elevGain * el + qn * P.kAlpha * (aNeutral - sa) -
       (P.dampPitch0 + P.dampPitch * sq + (airborne ? 0 : 2.5)) * (w[0] - pathPitch) -
       qn * P.stallPitch * stallAmt * stallSign;
+    // Soft AoA limiter while the augmentation is active (i.e. with speed in hand): hard pulls
+    // ride the buffet instead of departing. Slow, the hold has faded and a stall is possible.
+    if (hold > 0) {
+      var aHi = aS - 1.5 * DEG, aLo = P.alphaStallNeg + 1.5 * DEG;
+      if (alpha > aHi) angAcc[0] -= hold * qn * P.kAlpha * 3 * (alpha - aHi);
+      else if (alpha < aLo) angAcc[0] -= hold * qn * P.kAlpha * 3 * (alpha - aLo);
+    }
     // in a stall the wing drops toward the slip side (gently, this is a forgiving aeroplane)
     var drop = airborne ? stallAmt * qn * (5 * sb + 0.5 * Math.sin(p.time * 1.7)) : 0;
     angAcc[2] = -qnA * P.kAil * ai * (1 - 0.5 * stallAmt) - (P.dampRoll0 + P.dampRoll * sq) * (w[2] - turnRoll) +
@@ -443,7 +454,7 @@
       surfType = W.surfaceAt(pos[0], pos[2]);
       mu = surfType === 'grass' ? 0.06 : surfType === 'rough' ? 0.09 : P.muRoll;
     }
-    var firstContact = -1, noseOnly = true, contactSink = 0;
+    var firstContact = -1, noseOnly = true, contactSink = 0, noseSink = 0;
     for (var i = 0; i < 3; i++) {
       var wh = WHEELS[i];
       p.wheelContact[i] = false;
@@ -475,6 +486,7 @@
       if (firstContact < 0) firstContact = i;
       if (i > 0) noseOnly = false;
       contactSink = Math.max(contactSink, -vn);
+      if (i === 0) noseSink = -vn;
       // tyre frame on the ground plane
       if (wh.steer) v3.set(tA, Math.sin(p.steer), 0, -Math.cos(p.steer));
       else v3.copy(tA, FWD);
@@ -541,7 +553,12 @@
         var reason = hp.reason;
         if (reason === 'belly' || (hp.name === 'prop' && !gearOk)) reason = gearOk ? 'terrain' : 'bellyLanding';
         else if (reason === 'tail') reason = 'terrain';
-        if (reason === 'terrain' && surfType === 'rough') reason = 'rough';
+        else if (reason !== 'terrain') {
+          // nose / wingtip strikes are landing mishaps; flying into a hillside is 'terrain'
+          if (W && W.normalAt) W.normalAt(wp[0], wp[2], nrm); else v3.set(nrm, 0, 1, 0);
+          var nearLanding = nrm[1] > 0.9 && p.agl < P.gearHeight + 1.5 && vel[1] > -8;
+          if (!nearLanding) reason = 'terrain';
+        }
         crash(p, events, reason, v3.length(vel));
         return;
       }
@@ -573,7 +590,7 @@
         if (Math.abs(rollDeg) > WING_STRIKE_ROLL) { crash(p, events, 'wingStrike', v3.length(vel)); return; }
         if (surface === 'water') { crash(p, events, 'water', v3.length(vel)); return; }
         if (surface === 'rough' && gs > 12) { crash(p, events, 'rough', v3.length(vel)); return; }
-      } else if (p.wheelContact[0] && contactSink > HARD_LANDING + 1) {
+      } else if (noseSink > HARD_LANDING + 1) {
         // slamming the nose wheel down after a main-gear touchdown
         crash(p, events, 'noseStrike', v3.length(vel));
         return;
@@ -604,7 +621,6 @@
     p.onGround = contact || (p._phase === 'ground' && p._noContact < 0.12);
 
     // ---- integrate
-    v3.copy(velBefore, vel);
     var invM = 1 / P.mass;
     v3.scaleAndAdd(vel, vel, force, invM * dt);
     angAcc[0] += torque[0] / P.inertia[0];
@@ -617,8 +633,8 @@
     // (Tyre friction is velocity-saturated, so at standstill `force` is the driving force.)
     if (wheels === 3 && p.groundSpeed < 0.3 && Math.abs(w[1]) < 0.08) {
       var fh = Math.sqrt(force[0] * force[0] + force[2] * force[2]);
-      var hold = nTotal * (P.muStatic + P.muBrake * p.brake);
-      if (fh < hold) {
+      var holdF = nTotal * (P.muStatic + P.muBrake * p.brake);
+      if (fh < holdF) {
         vel[0] = 0; vel[2] = 0;
         w[1] = 0;
         w[2] *= 0.9;

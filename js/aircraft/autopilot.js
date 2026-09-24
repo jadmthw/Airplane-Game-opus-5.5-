@@ -26,7 +26,7 @@
     if (!p._ap) {
       p._ap = {
         ctl: { pitch: 0, roll: 0, yaw: 0, throttle: 0, brake: 0, smoke: false },
-        last: v3.create(), prev: v3.create(), has: false, iGam: 0, iSpd: 0, t: 0
+        last: v3.create(), prev: v3.create(), has: false, iGam: 0, iSpd: 0, t: 0, escape: 0
       };
     }
     return p._ap;
@@ -57,7 +57,7 @@
     else if (v3.distSq(s.last, target) > 1) {
       if (v3.dist(p.pos, s.last) < 400) v3.copy(s.prev, s.last); else v3.copy(s.prev, p.pos);
       v3.copy(s.last, target);
-      s.iGam = 0;
+      s.iGam = 0; s.escape = 0;
     }
 
     var hdg = p.heading * DEG;
@@ -94,9 +94,12 @@
       aim[0] = target[0]; aim[2] = target[2];
     }
     var ring = opts.ring;
+    var bankLimit = (opts.bankLimit || 62) * DEG;
+    var turnR = V * V / (G * Math.tan(bankLimit));
     if (ring && ring.dir) {
-      // near the ring aim at a point behind it on its axis so we cross it square-on
-      var lead = M.clamp(dist * 0.45, 0, 110);
+      // approaching, line up on a point behind the ring on its axis (sets up the next leg);
+      // inside ~one turn radius just go for the centre - any crossing angle counts
+      var lead = M.clamp((dist - 1.2 * turnR) * 0.45, 0, 110);
       var rx = target[0] - ring.dir[0] * lead, rz = target[2] - ring.dir[2] * lead;
       var wRing = 1 - M.smoothstep(250, 600, dist);
       aim[0] = M.lerp(aim[0], rx, wRing); aim[2] = M.lerp(aim[2], rz, wRing);
@@ -104,7 +107,15 @@
     }
     var ax = aim[0] - p.pos[0], az = aim[2] - p.pos[2];
     var eTrk = M.wrapPi(Math.atan2(ax, -az) - trk);
-    var bankLimit = (opts.bankLimit || 62) * DEG;
+    // Too close to turn onto it (the classic pursuit orbit): fly straight out, then come back.
+    s.t += dt;
+    if (s.escape > 0) {
+      s.escape -= dt;
+      eTrk = 0;
+    } else if (dist < 1.8 * turnR && Math.abs(M.wrapPi(Math.atan2(dx, -dz) - trk)) > 1.9) {
+      s.escape = 2.6 * turnR / V;
+      eTrk = 0;
+    }
     var turnRate = M.clamp(eTrk * 0.9, -0.6, 0.6);
     var bankCmd = M.clamp(Math.atan(turnRate * V / G), -bankLimit, bankLimit);
     var roll = p.roll * DEG;
@@ -133,6 +144,9 @@
     need = Math.max(need, groundAt(p.pos[0], p.pos[2]) + clr * 0.6);
     if (p.pos[1] < need) vsCmd = Math.max(vsCmd, Math.min(16, (need - p.pos[1]) * 0.6 + 2));
     if (opts.takeoff && p.agl < 25) vsCmd = Math.max(vsCmd, 5);
+    // never ask for more climb than the speed margin over the stall can pay for
+    var vs1 = specs.vStall + (specs.vStallFlaps - specs.vStall) * p.flaps;
+    vsCmd = Math.min(vsCmd, Math.max(0.5, (V - vs1 * 1.15) * 0.9));
     var gCmd = Math.asin(M.clamp(vsCmd / V, -0.45, 0.45));
     var gam = Math.asin(M.clamp(p.verticalSpeed / V, -1, 1));
     var eG = gCmd - gam;
@@ -144,8 +158,10 @@
     var dAlpha = nExtra * P.weight / Math.max(qS * P.clAlpha, 1);
     var perStick = P.kElev / P.kAlpha;
     var pitch = dAlpha / perStick + s.iGam;
-    // stall protection: back off as the stall warning builds
-    if (p.stallWarning > 0.2) pitch = Math.min(pitch, 0.3 * (1 - p.stallWarning));
+    // stall protection: an AoA limiter a few degrees short of the critical angle
+    var aLim = P.alphaStall + P.alphaStallFlaps * p.flaps - 4 * DEG;
+    if (p.aoa > aLim - 3 * DEG) pitch = Math.min(pitch, (aLim - p.aoa) * 5);
+    if (p.aoa > aLim) s.iGam = Math.min(s.iGam, 0);
     c.pitch = M.clamp(pitch, -0.8, 1);
 
     // ---------------------------------------------------------------- speed
@@ -158,7 +174,7 @@
   }
 
   /** Forget guidance state (call after a respawn). */
-  function reset(p) { if (p && p._ap) { p._ap.has = false; p._ap.iGam = 0; p._ap.iSpd = 0; } }
+  function reset(p) { if (p && p._ap) { p._ap.has = false; p._ap.iGam = 0; p._ap.iSpd = 0; p._ap.escape = 0; } }
 
   RL.Autopilot = { fly: fly, reset: reset };
 })(window.RL = window.RL || {});

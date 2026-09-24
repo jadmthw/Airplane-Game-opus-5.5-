@@ -21,7 +21,7 @@
     attract: 'Showcase'
   };
   var BLEND_TIME = 0.42;
-  var CUT_DISTANCE = 260;      // blends longer than this cut instead
+  var CUT_DISTANCE = 120;      // blends longer than this cut instead (no valley-wide swoops)
   var WORLD_UP = v3.create(0, 1, 0);
   var AX_FWD = v3.create(0, 0, -1), AX_UP = v3.create(0, 1, 0), AX_RIGHT = v3.create(1, 0, 0);
   var COCKPIT_FALLBACK = v3.create(0, 1, 0.5);
@@ -35,7 +35,7 @@
 
   // pose computed by the active mode this frame
   var want = { eye: v3.create(), fwd: v3.create(0, 0, -1), up: v3.create(0, 1, 0), fov: 1, near: 0.8, clearance: 1.5, los: true };
-  // pose we blend from
+  // pose we blend from (eye relative to the aircraft position)
   var from = { eye: v3.create(), fwd: v3.create(0, 0, -1), up: v3.create(0, 1, 0), fov: 1 };
   // final output pose
   var out = { eye: v3.create(0, 60, 700), fwd: v3.create(0, 0, -1), up: v3.create(0, 1, 0), fov: 1 };
@@ -378,8 +378,9 @@
   }
 
   // ------------------------------------------------------------------ blending
+  // The start pose is stored relative to the aircraft so a blend never lags behind a fast plane.
   function startBlend(dur, easeIn) {
-    v3.copy(from.eye, out.eye);
+    v3.sub(from.eye, out.eye, pPos);
     v3.copy(from.fwd, out.fwd);
     v3.copy(from.up, out.up);
     from.fov = out.fov;
@@ -461,7 +462,8 @@
     if (cut && blendT >= 1) blendT = 1;
 
     // long moves cut; otherwise blend with an ease (in when diving into the cockpit)
-    if (blendT < 1 && v3.dist(from.eye, want.eye) > CUT_DISTANCE) blendT = 1;
+    v3.add(tmpD, pPos, from.eye);   // blend start in world space
+    if (blendT < 1 && v3.dist(tmpD, want.eye) > CUT_DISTANCE) blendT = 1;
     if (snap) blendT = 1;
     var t = 1;
     if (blendT < 1) {
@@ -471,7 +473,7 @@
     if (t >= 1) {
       v3.copy(out.eye, want.eye); v3.copy(out.fwd, want.fwd); v3.copy(out.up, want.up); out.fov = want.fov;
     } else {
-      v3.lerp(out.eye, from.eye, want.eye, t);
+      v3.lerp(out.eye, tmpD, want.eye, t);
       v3.lerp(out.fwd, from.fwd, want.fwd, t);
       if (v3.lengthSq(out.fwd) < 1e-6) v3.copy(out.fwd, want.fwd);
       v3.normalize(out.fwd, out.fwd);

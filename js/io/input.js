@@ -56,7 +56,7 @@
   var mouseIdle = 0;
   var mouseX = -1, mouseY = -1;      // last client position (fallback mode)
   var lockSupported = false;
-  var lockClickFailures = 0, lockRequestFromClick = false;
+  var lockClickFailures = 0, lockRequestFromClick = false, lastLockRequestAt = -10;
   var prevState = null;
 
   // stick (raw virtual stick, unit disc) and smoothed key axes
@@ -177,6 +177,7 @@
 
   function requestPointerLock() {
     if (!canvas || !lockSupported || lockElement() === canvas) return;
+    lastLockRequestAt = now;
     try {
       var r = (canvas.requestPointerLock || canvas.mozRequestPointerLock).call(canvas);
       // Newer browsers return a promise that rejects (e.g. right after Esc); never let that leak.
@@ -380,7 +381,8 @@
     Input.pointerLocked = lockElement() === canvas;
     if (st !== prevState) {
       if (st !== 'playing' && Input.pointerLocked) exitPointerLock();
-      if (st === 'playing' && prevState !== null && Input.mouseFlight && !Input.pointerLocked) {
+      if (st === 'playing' && prevState !== null && Input.mouseFlight && !Input.pointerLocked &&
+          now - lastLockRequestAt > 0.5) {   // (a click/Enter may already have asked)
         lockRequestFromClick = false;
         requestPointerLock();
       }
