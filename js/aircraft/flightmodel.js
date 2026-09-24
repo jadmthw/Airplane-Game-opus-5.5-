@@ -40,17 +40,17 @@
     clFlaps: 0.75,                       // CL increment at full flaps
     cd0: 0.019, cdGear: 0.014, cdFlaps: 0.045, oswald: 0.85, cyBeta: 0.55,
     // engine / prop: thrust = min(linear static region, power-limited P/V), plus windmill drag
-    thrustStatic: 1150, thrustAt36: 2800, power: 100000, powerExp: 1.8, windmill: 0.37,
+    thrustStatic: 2000, thrustAt36: 2800, power: 100000, powerExp: 1.8, windmill: 0.37,
     idleRpm: 0.2, propDisk: 2.54, propWash: 0.7,
     // rotational "feel" constants (angular accelerations at the reference dynamic pressure)
     vRef: 55,
-    kElev: 5.6, kAlpha: 16.0, alphaTrim: 1.5 * DEG, dampPitch0: 0.6, dampPitch: 2.5,
+    kElev: 5.6, kAlpha: 16.0, alphaTrim: 1.5 * DEG, dampPitch0: 0.5, dampPitch: 3.0, pathReturn: 2.5, holdFlaps: 0.85,
     stallPitch: 2.6,
     kAil: 15.3, dampRoll0: 0.4, dampRoll: 5.5, kDihedral: 4.0,
-    kRud: 2.2, kBeta: 7.0, dampYaw0: 0.5, dampYaw: 2.5, kCoord: 1.2,
+    kRud: 2.2, kBeta: 7.0, dampYaw0: 0.5, dampYaw: 2.5,
     // gear (body space, model origin = CG). Wheel points are the tyre bottoms, strut extended.
-    gearHeight: 1.45, noseZ: -2.30, mainZ: 0.28, mainX: 1.15, staticSag: 0.08, stroke: 0.30,
-    muRoll: 0.045, muStatic: 0.05, muBrake: 0.45, muLat: 0.85,
+    gearHeight: 1.45, noseZ: -2.30, mainZ: 0.28, mainX: 1.3, staticSag: 0.08, stroke: 0.30,
+    muRoll: 0.035, muRollSpeed: 0.0058, muStatic: 0.045, muBrake: 0.45, muLat: 0.55,
     gearTime: 3.2, flapRate: 0.45
   };
   P.weight = P.mass * G;
@@ -114,7 +114,7 @@
     vMax: 87,
     vNeverExceed: 108
   };
-  specs.vRotate = specs.vStall * 1.05;
+  specs.vRotate = specs.vStall * 1.12;
 
   // ------------------------------------------------------------------ scratch (no garbage)
   var FWD = [0, 0, -1], UP = [0, 1, 0], RIGHT = [1, 0, 0];
@@ -389,35 +389,44 @@
     var el = sf.elevator, ai = sf.aileron, ru = sf.rudder;
     var stallSign = alpha >= 0 ? 1 : -1;
     var airborne = p._phase !== 'ground';
+    // Rotation of the flight path itself (from the current acceleration). Damping acts on the
+    // body rates relative to it, so steady turns / loops are not resisted (no overbanking, the
+    // commanded AoA is reached in a pull) while oscillations about the path are damped.
+    var pathPitch = 0, pathYaw = 0, turnRoll = 0;
+    if (airborne && V > 12) {
+      v3.cross(tC, air, force);
+      v3.scale(tC, tC, 1 / (V * V * P.mass));
+      pathPitch = v3.dot(tC, p.right);
+      pathYaw = v3.dot(tC, p.up);
+      var vh2 = air[0] * air[0] + air[2] * air[2];
+      if (vh2 > 100) turnRoll = -(tC[1] * V * V / vh2) * p.forward[1];
+    }
     // Stability augmentation ("mild pitch stability"): with the stick centred the aeroplane
-    // holds its flight path (attitude stays roughly put, banked turns hold altitude). The hold
-    // fades out approaching the stall, so a slow aeroplane lowers its nose toward trim by itself.
+    // holds its flight path with a gentle return toward level (bank compensated, so banked turns
+    // hold altitude); a steady stick holds a steady climb angle. The hold fades out approaching
+    // the stall, so a slow aeroplane lowers its nose toward trim by itself.
     var aNeutral = P.alphaTrim;
     if (airborne && V > 5) {
       var vsNow = M.lerp(specs.vStall, specs.vStallFlaps, p.flaps);
-      var hold = M.smoothstep(1.12 * vsNow, 1.45 * vsNow, V);
+      var hold = M.smoothstep(1.12 * vsNow, 1.45 * vsNow, V) * (1 - P.holdFlaps * p.flaps);
       if (hold > 0) {
         var sg = M.clamp(air[1] / V, -1, 1), cg = Math.sqrt(1 - sg * sg);
         var cphi = M.clamp(p.up[1] / Math.max(0.2, Math.sqrt(Math.max(0, 1 - p.forward[1] * p.forward[1]))), -1, 1);
-        var nHold = cg * cphi / Math.max(cphi * cphi, 0.25);
+        var nHold = cg * cphi / Math.max(cphi * cphi, 0.25) -
+          Math.max(0, cphi) * V * sg * cg / (P.pathReturn * G);
         var aHold = (nHold * P.weight / Math.max(qS, 1) - P.cl0 - P.clFlaps * p.flaps) / P.clAlpha;
         aHold = M.clamp(aHold, P.alphaStallNeg + 3 * DEG, aS - 2.5 * DEG);
         aNeutral += hold * (aHold - P.alphaTrim);
       }
     }
     angAcc[0] = qnT * P.kElev * el + qn * P.kAlpha * (aNeutral - sa) -
-      (P.dampPitch0 + P.dampPitch * sq) * w[0] - qn * P.stallPitch * stallAmt * stallSign;
+      (P.dampPitch0 + P.dampPitch * sq + (airborne ? 0 : 2.5)) * (w[0] - pathPitch) -
+      qn * P.stallPitch * stallAmt * stallSign;
     // in a stall the wing drops toward the slip side (gently, this is a forgiving aeroplane)
     var drop = airborne ? stallAmt * qn * (5 * sb + 0.5 * Math.sin(p.time * 1.7)) : 0;
-    angAcc[2] = -qnA * P.kAil * ai * (1 - 0.5 * stallAmt) - (P.dampRoll0 + P.dampRoll * sq) * w[2] +
+    angAcc[2] = -qnA * P.kAil * ai * (1 - 0.5 * stallAmt) - (P.dampRoll0 + P.dampRoll * sq) * (w[2] - turnRoll) +
       P.kDihedral * qn * sb + drop;
-    angAcc[1] = -qnT * P.kRud * ru - qn * P.kBeta * sb - (P.dampYaw0 + P.dampYaw * sq) * w[1];
-    if (airborne && V > 12) {
-      // automatic turn coordination: yaw at the rate the flight path is turning (about body up)
-      v3.cross(tC, air, force);
-      var pathYaw = v3.dot(tC, p.up) / (V * V * P.mass);
-      angAcc[1] += P.kCoord * Math.min(qn, 1) * (pathYaw - w[1]);
-    }
+    angAcc[1] = -qnT * P.kRud * ru - qn * P.kBeta * sb - (P.dampYaw0 + P.dampYaw * sq) * (w[1] - pathYaw);
     if (p.overspeed > 0) {
       // buffet
       angAcc[0] += p.overspeed * 3 * Math.sin(p.time * 37);
@@ -432,7 +441,7 @@
     var surfType = null, mu = P.muRoll;
     if (p.agl < 6 && W && W.surfaceAt) {
       surfType = W.surfaceAt(pos[0], pos[2]);
-      mu = surfType === 'grass' ? 0.07 : surfType === 'rough' ? 0.1 : P.muRoll;
+      mu = surfType === 'grass' ? 0.06 : surfType === 'rough' ? 0.09 : P.muRoll;
     }
     var firstContact = -1, noseOnly = true, contactSink = 0;
     for (var i = 0; i < 3; i++) {
@@ -476,7 +485,7 @@
       var vLong = v3.dot(vPt, fwdG), vLat = v3.dot(vPt, latG);
       var muL = mu + (wh.brake ? P.muBrake * p.brake : 0);
       var fLong = -N * muL * sat(vLong / 0.3);
-      var fLat = -N * P.muLat * sat(vLat / 0.25);
+      var fLat = -N * P.muLat * sat(vLat / 0.8);
       v3.scale(fC, nrm, N);
       v3.scaleAndAdd(fC, fC, fwdG, fLong);
       v3.scaleAndAdd(fC, fC, latG, fLat);
@@ -484,6 +493,9 @@
       toBody(fB, fC, q);
       v3.cross(tB, wh.p, fB);
       v3.add(torque, torque, tB);
+      // speed-dependent wheel/ground drag (tyre scrub, runway roughness). Applied through the
+      // CG so it doesn't pitch the nose down and fight rotation. Tunes the takeoff roll.
+      v3.scaleAndAdd(force, force, fwdG, -N * P.muRollSpeed * vLong);
     }
     p.wheelsOnGround = wheels;
 
@@ -527,7 +539,7 @@
           continue;
         }
         var reason = hp.reason;
-        if (reason === 'belly') reason = gearOk ? 'terrain' : 'bellyLanding';
+        if (reason === 'belly' || (hp.name === 'prop' && !gearOk)) reason = gearOk ? 'terrain' : 'bellyLanding';
         else if (reason === 'tail') reason = 'terrain';
         if (reason === 'terrain' && surfType === 'rough') reason = 'rough';
         crash(p, events, reason, v3.length(vel));
