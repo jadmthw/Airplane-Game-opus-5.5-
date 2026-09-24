@@ -227,7 +227,7 @@
 
   // ------------------------------------------------------------------ cloud field
   var WRAP = 11000;            // drifting clouds wrap around within [-WRAP, WRAP]
-  var clusters = [];           // {x, z, base, height, rx, rz, anchored, puffStart, puffCount}
+  var clusters = [];           // {x, z, base, height, rx, rz, anchored}
   var puffLocal = null;        // Float32Array per puff: lx, ly, lz, size, variant, rot, bright, alpha
   var puffCluster = null;      // Int16Array: cluster index per puff
   var nPuffs = 0;
@@ -256,7 +256,6 @@
     for (i = 0; i < list.length; i++) {
       var c = list[i];
       c.rz = c.rx * (0.6 + rnd() * 0.4);
-      c.puffStart = puffs.length;
       var np = Math.min(maxPer, Math.round(10 + c.rx / 26));
       if (low) np = Math.round(np * 0.7);
       for (var k = 0; k < np; k++) {
@@ -268,9 +267,9 @@
         var ly = size * 0.45 + rnd() * Math.max(dome - size * 0.55, 0);
         puffs.push([lx, ly, lz, size, Math.floor(rnd() * 4), rnd() * 6.283, 0.95 + rnd() * 0.1, 0.75 + rnd() * 0.25, i]);
       }
-      c.puffCount = np;
     }
     clusters = list;
+    Sky.clusters = list;
     nPuffs = puffs.length;
     puffLocal = new Float32Array(nPuffs * 8);
     puffCluster = new Int16Array(nPuffs);
@@ -299,7 +298,8 @@
 
   var Sky = {
     ready: false,
-    whiteout: 0,
+    whiteout: 0,          // 0..1, how deep inside a cloud the camera is (for HUD/audio if wanted)
+    clusters: [],         // read-only cloud layout {x, z, base, height, rx, rz, anchored} (x/z at t=0)
 
     init: function (gl) {
       if (!gl) return;

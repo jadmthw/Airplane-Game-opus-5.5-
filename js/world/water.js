@@ -4,8 +4,9 @@
  * One quad per lake (terrain stays above the water level everywhere else). The fragment shader
  * reads the terrain heightfield (R16F texture from Terrain.getHeightData) to get the water depth:
  * depth-tinted colour and alpha, a soft shoreline and animated foam. Waves are a sum of wind-aligned
- * directional swells plus drifting noise ripples; fresnel mixes in skyColor() of the reflected
- * direction (with a dark band standing in for the reflected mountains) and a sun / moon glint.
+ * directional swells plus drifting noise ripples (faded by pixel footprint so they never alias);
+ * fresnel mixes in a reflection found by ray-marching the reflected ray over the heightfield
+ * (mirrored hills and peaks, skyColor() above them) and a sun / moon glint.
  */
 (function (RL) {
   'use strict';
@@ -33,8 +34,30 @@
     '  return texture(u_height, uv).r;',
     '}',
     '',
+    '// Attenuation for a wave of wavenumber k given the pixel footprint fp (m): fades waves that',
+    '// would be narrower than a few pixels, which otherwise alias into moire rings far away.',
+    'float aa(float k, float fp) { return 1.0 - smoothstep(0.3, 1.0, k * fp); }',
+    '',
+    '// Reflected view: march the reflected ray over the heightfield so the surrounding hills and',
+    '// peaks appear mirrored in the lake; the sky where nothing is hit.',
+    'vec3 reflection(vec3 ro, vec3 rd) {',
+    '  float t = 6.0;',
+    '  for (int i = 0; i < 22; i++) {',
+    '    vec3 p = ro + rd * t;',
+    '    float h = terrainH(p.xz);',
+    '    if (h > p.y) {',
+    '      vec3 alb = mix(vec3(0.27, 0.40, 0.19), vec3(0.45, 0.41, 0.36), smoothstep(200.0, 650.0, h));',
+    '      alb = mix(alb, vec3(0.92, 0.94, 0.98), smoothstep(1150.0, 1300.0, h));',
+    '      vec3 c = toLinear(alb) * (hemiAmbient(vec3(0.0, 1.0, 0.0)) + u_sunColor * max(u_sunDir.y, 0.0) * 0.55);',
+    '      return applyFog(c, p);',
+    '    }',
+    '    t *= 1.38;',
+    '  }',
+    '  return skyColor(rd);',
+    '}',
+    '',
     '// Slope (d height / d xz) of the animated surface.',
-    'vec2 waveSlope(vec2 p, float t, float fade) {',
+    'vec2 waveSlope(vec2 p, float t, float fp) {',
     '  vec2 w = u_windDir;',
     '  vec2 s = vec2(0.0);',
     '  // wind-aligned swells: direction, wavenumber, steepness, speed',
@@ -42,21 +65,21 @@
     '  vec2 d1 = normalize(w + vec2(-w.y, w.x) * 0.55);',
     '  vec2 d2 = normalize(w - vec2(-w.y, w.x) * 0.7);',
     '  vec2 d3 = normalize(vec2(-w.y, w.x) + w * 0.3);',
-    '  s += d0 * cos(dot(d0, p) * 0.62 - t * 2.4) * 0.055;',
-    '  s += d1 * cos(dot(d1, p) * 1.13 - t * 3.3) * 0.045;',
-    '  s += d2 * cos(dot(d2, p) * 1.91 - t * 4.2) * 0.035;',
-    '  s += d3 * cos(dot(d3, p) * 3.40 - t * 5.8) * 0.025;',
+    '  s += d0 * cos(dot(d0, p) * 0.62 - t * 2.4) * 0.055 * aa(0.62, fp);',
+    '  s += d1 * cos(dot(d1, p) * 1.13 - t * 3.3) * 0.045 * aa(1.13, fp);',
+    '  s += d2 * cos(dot(d2, p) * 1.91 - t * 4.2) * 0.035 * aa(1.91, fp);',
+    '  s += d3 * cos(dot(d3, p) * 3.40 - t * 5.8) * 0.025 * aa(3.40, fp);',
     '  // drifting cat\'s-paw ripples (noise gradient)',
-    '  vec2 q = p * 0.35 - w * t * 0.6;',
     '  float e = 0.35;',
+    '  vec2 q = p * 0.35 - w * t * 0.6;',
     '  float n0 = vnoise(q), nx = vnoise(q + vec2(e, 0.0)), nz = vnoise(q + vec2(0.0, e));',
-    '  s += vec2(nx - n0, nz - n0) / e * 0.05;',
+    '  s += vec2(nx - n0, nz - n0) / e * 0.05 * aa(2.2, fp);',
     '  vec2 q2 = p * 1.3 + w.yx * t * 0.9;',
     '  float m0 = vnoise(q2), mx = vnoise(q2 + vec2(e, 0.0)), mz = vnoise(q2 + vec2(0.0, e));',
-    '  s += vec2(mx - m0, mz - m0) / e * 0.022;',
+    '  s += vec2(mx - m0, mz - m0) / e * 0.022 * aa(8.0, fp);',
     '  // gusts roughen patches of the lake',
     '  float gust = 0.6 + 0.8 * vnoise(p * 0.004 - w * t * 0.02);',
-    '  return s * gust * fade;',
+    '  return s * gust;',
     '}',
     '',
     'void main() {',
@@ -66,8 +89,9 @@
     '  vec3 toCam = u_camPos - v_pos;',
     '  float dist = length(toCam);',
     '  vec3 V = toCam / max(dist, 1e-3);',
+    '  float fp = length(fwidth(v_pos.xz));',
     '  float fade = 1.0 - 0.85 * smoothstep(60.0, 1600.0, dist);',
-    '  vec2 sl = waveSlope(v_pos.xz, u_time, fade);',
+    '  vec2 sl = waveSlope(v_pos.xz, u_time, fp) * fade;',
     '  vec3 N = normalize(vec3(-sl.x, 1.0, -sl.y));',
     '  float sh = shadowFactor(v_pos, vec3(0.0, 1.0, 0.0));',
     '',
@@ -75,11 +99,8 @@
     '  float fres = 0.02 + 0.98 * pow(1.0 - cosT, 5.0);',
     '  vec3 R = reflect(-V, N);',
     '  R.y = abs(R.y);',
-    '  vec3 refl = skyColor(R);',
-    '  // the surrounding mountains show up as a darker band just above the reflected horizon',
-    '  vec3 lightAmt = hemiAmbient(vec3(0.0, 1.0, 0.0)) + u_sunColor * max(u_sunDir.y, 0.0) * 0.45;',
-    '  vec3 mountains = mix(toLinear(vec3(0.24, 0.30, 0.22)) * lightAmt, u_fogColor, 0.45);',
-    '  refl = mix(mountains, refl, smoothstep(0.02, 0.2, R.y));',
+    '  R.y = max(R.y, 0.004);',
+    '  vec3 refl = reflection(v_pos + vec3(0.0, 0.5, 0.0), normalize(R));',
     '',
     '  // water body: shallow turquoise -> deep blue-green, lit by sun + sky',
     '  float dk = 1.0 - exp(-max(depth, 0.0) * 0.16);',
@@ -163,7 +184,7 @@
       var gl = glc;
       if (!gl || !prog) return;
       if (!heightTex) {
-        // Terrain may have finished after us in odd boot orders; try once more.
+        // Terrain was not ready when we initialised (odd boot order); retry until it is.
         heightTex = buildHeightTexture(gl);
         if (!heightTex) return;
         Water.ready = true;

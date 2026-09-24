@@ -633,6 +633,8 @@
     '  vec4 clip = u_viewProj * vec4(P, 1.0);',
     '  float pxPerM = u_proj[1][1] * u_resolution.y * 0.5 / max(clip.w, 1e-3);',
     '  float size = max(i_pos.w, minPx / pxPerM);',
+    '  // lights inflated to the minimum pixel size get dimmer so distant rows do not merge into blobs',
+    '  if (op == 0.0) inten *= clamp(sqrt(i_pos.w / size), 0.4, 1.0);',
     '  vec3 right = vec3(u_view[0][0], u_view[1][0], u_view[2][0]);',
     '  vec3 up = vec3(u_view[0][1], u_view[1][1], u_view[2][1]);',
     '  vec3 wp = P + (right * a_position.x + up * a_position.y) * size + (toCam / dist) * min(size, dist * 0.5);',
@@ -916,7 +918,7 @@
       var ly = Math.max(E + 1.0, ground + 0.8);
       var xs = [-6, -3, 0, 3, 6];
       if (k === 8) xs = xs.concat([-15, -12, -9, 9, 12, 15]);
-      p.box(Math.abs(xs[xs.length - 1]) * 2 + 1 > 13 ? 31 : 13, 0.14, 0.14, COL.darkSteel, CX, ly - 0.35, z);
+      p.box(k === 8 ? 31 : 13, 0.14, 0.14, COL.darkSteel, CX, ly - 0.35, z);   // crossbar
       for (i = 0; i < xs.length; i++) {
         var g2 = groundAt(CX + xs[i], z);
         p.box(0.12, Math.max(0.2, ly - 0.2 - g2), 0.12, COL.darkSteel, CX + xs[i], g2, z);
@@ -1242,7 +1244,7 @@
     gl.disable(gl.CULL_FACE);
     U_LIGHTS.u_lightsOn = M.clamp(nf * 2.2, 0, 1);
     U_LIGHTS.u_beaconAngle = beaconAngle;
-    U_LIGHTS.u_minPx = 2.6 * (frame.pixelRatio || 1);
+    U_LIGHTS.u_minPx = 2.2 * (frame.pixelRatio || 1);
     G.use(gl, progLight, U_LIGHTS);
     G.applyFrame(gl, progLight, frame);
     G.drawMesh(gl, meshLights);

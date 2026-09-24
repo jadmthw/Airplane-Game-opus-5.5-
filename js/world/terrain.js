@@ -10,7 +10,7 @@
  *   3. Carving: a mesa plateau around the canyon (so it always reads as a deep gorge), the canyon
  *      itself (flat floor, terraced rock walls), the lake bowl, and the airfield flat zone.
  *
- * heightAt() interpolates exactly the rendered triangles (alternating diagonals, see cellTri()).
+ * heightAt() interpolates exactly the rendered triangles (per-cell diagonal choice in `diag`).
  */
 (function (RL) {
   'use strict';
@@ -45,12 +45,12 @@
   var MTN_AMP = 1750;       // main ranges
   var LAYOUT_RES = 256;     // layout grid cells per side
   var SKIRT_OUTER = 24000;  // horizon ring radius
-  var SKIRT_CELL = 500;
 
   // ------------------------------------------------------------------ state
   var half = C.world.half;
   var res = 256, N = 257, cell = 1, invCell = 1;
   var data = null;                 // Float32Array(N*N) heights, row-major z then x
+  var diag = null;                 // Uint8Array(res*res): 0 = split a-d, 1 = split b-c
   var heightData = null;
   var nA = null, nB = null;        // noise instances (terrain shape / surface variety)
   var OCT = 6;
@@ -192,7 +192,8 @@
   function canyonRim(t) { return 300 * sstep(0.04, 0.30, t) * (1 - sstep(0.60, 0.80, t)); }
   // Terraced (strata) rock wall profile, 0 at the floor edge -> 1 at the rim. Monotonic.
   function wallCurve(s) {
-    var b = 1 - (1 - s) * (1 - s);
+    // steep cliff with a short scree apron at its foot
+    var b = (1 - (1 - s) * (1 - s)) * (0.3 + 0.7 * sstep(0, 0.22, s));
     var q = b * 5, fq = q - Math.floor(q);
     var terr = (Math.floor(q) + sstep(0.3, 0.7, fq)) / 5;
     return b + (terr - b) * 0.5;
@@ -269,8 +270,10 @@
 
   // ------------------------------------------------------------------ height function
   function lakeDist(lk, x, z) {
+    var dx = x - lk.x, dz = z - lk.z, d = Math.sqrt(dx * dx + dz * dz);
+    if (d > lk.radius * 2.4) return d;   // the wobble (max 7.5 %) cannot matter this far out
     // wobbly shoreline so the lake is not a perfect circle
-    return Math.hypot(x - lk.x, z - lk.z) * (1 + 0.075 * nB.simplex2(x * 0.0024 + 3.3, z * 0.0024 - 1.7));
+    return d * (1 + 0.075 * nB.simplex2(x * 0.0024 + 3.3, z * 0.0024 - 1.7));
   }
 
   function heightFn(x, z) {
@@ -291,8 +294,10 @@
       var pm = sstep(0, V.ramp, D);
       for (var p = 0; p < PEAKS.length; p++) {
         var pk = PEAKS[p];
-        var rr = Math.hypot(x - pk.x, z - pk.z) / pk.R;
-        if (rr < 1) h += pk.h * Math.pow(1 - rr, 1.7) * (0.65 + 0.7 * r) * pm;
+        var pdx = x - pk.x, pdz = z - pk.z, pr2 = pdx * pdx + pdz * pdz;
+        if (pr2 >= pk.R * pk.R) continue;
+        var rr = Math.sqrt(pr2) / pk.R;
+        h += pk.h * Math.pow(1 - rr, 1.7) * (0.65 + 0.7 * r) * pm;
       }
     }
 
@@ -305,8 +310,11 @@
         var m = 1 - sstep(edge + 300, edge + 950, cd);
         if (plateau > h) h += (plateau - h) * m;
       }
-      if (cd < edge && h > fl) {
-        var s = clamp((cd - CN.halfWidth) / CN.wallWidth, 0, 1);
+      // the floor widens a little under the arch so its legs stand on flat ground
+      var adx = x - C.arch.x, adz = z - C.arch.z;
+      var hw = CN.halfWidth + 30 * (1 - sstep(140, 320, Math.sqrt(adx * adx + adz * adz)));
+      if (cd < hw + CN.wallWidth && h > fl) {
+        var s = clamp((cd - hw) / CN.wallWidth, 0, 1);
         var bed = fl + 0.45 * nB.simplex2(x * 0.02, z * 0.02);
         if (cd < 26) bed -= 1.8 * (1 - (cd / 26) * (cd / 26));   // dry river channel
         h = bed + (h - bed) * wallCurve(s);
@@ -390,7 +398,7 @@
     r += (0.19 - r) * fAmt; g += (0.32 - g) * fAmt; b += (0.15 - b) * fAmt;
     meadow *= 1 - fAmt;
     // rock on steep slopes and bare summits
-    var cd = sampleLayout(x, z).CD;
+    var lay = sampleLayout(x, z), cd = lay.CD, ct = lay.CT;
     var edge = CN.halfWidth + CN.wallWidth;
     // vegetation clings to steeper ground low down; high up only gentle slopes stay green
     var rockSlope = 0.44 - 0.14 * sstep(250, 1100, h);
@@ -410,7 +418,7 @@
       meadow *= 1 - rockAmt;
     }
     // canyon floor: warm gravel with a pale dry riverbed
-    var floorAmt = (1 - sstep(CN.halfWidth - 12, CN.halfWidth + 18, cd)) * sstep(0.02, 0.06, sampleLayout(x, z).CT + 0.05);
+    var floorAmt = (1 - sstep(CN.halfWidth - 12, CN.halfWidth + 18, cd)) * sstep(0.02, 0.06, ct + 0.05);
     if (floorAmt > 0) {
       var bedAmt = 1 - sstep(14, 30, cd);
       var fr = 0.55 + 0.08 * bedAmt, fg = 0.47 + 0.08 * bedAmt, fb = 0.36 + 0.09 * bedAmt;
@@ -456,7 +464,7 @@
     var fx = gx - ix, fz = gz - iz;
     var i = iz * N + ix;
     var ha = data[i], hb = data[i + 1], hc = data[i + N], hd = data[i + N + 1];
-    if (((ix + iz) & 1) === 0) {           // diagonal a-d: triangles (a,c,d) and (a,d,b)
+    if (diag[iz * res + ix] === 0) {       // diagonal a-d: triangles (a,c,d) and (a,d,b)
       if (fz > fx) return ha + (hd - hc) * fx + (hc - ha) * fz;
       return ha + (hb - ha) * fx + (hd - hb) * fz;
     }
@@ -478,7 +486,7 @@
     var i = iz * N + ix;
     var ha = data[i], hb = data[i + 1], hc = data[i + N], hd = data[i + N + 1];
     var dx, dz;
-    if (((ix + iz) & 1) === 0) {
+    if (diag[iz * res + ix] === 0) {
       if (fz > fx) { dx = hd - hc; dz = hc - ha; } else { dx = hb - ha; dz = hd - hb; }
     } else if (fx + fz <= 1) { dx = hb - ha; dz = hc - ha; } else { dx = hd - hc; dz = hd - hb; }
     var nx = -dx, ny = cell, nz = -dz;
@@ -520,62 +528,82 @@
     for (iz = 0; iz < res; iz++) {
       for (ix = 0; ix < res; ix++) {
         var a = iz * N + ix, b = a + 1, c = a + N, d = a + N + 1;
-        if (((ix + iz) & 1) === 0) { idx[k++] = a; idx[k++] = c; idx[k++] = d; idx[k++] = a; idx[k++] = d; idx[k++] = b; }
+        if (diag[iz * res + ix] === 0) { idx[k++] = a; idx[k++] = c; idx[k++] = d; idx[k++] = a; idx[k++] = d; idx[k++] = b; }
         else { idx[k++] = a; idx[k++] = c; idx[k++] = b; idx[k++] = b; idx[k++] = c; idx[k++] = d; }
       }
     }
     return RL.GL.createMesh(gl, { positions: pos, normals: nrm, colors: col, colorSize: 4, uvs: uv, indices: idx });
   }
 
-  /** Horizon ring of low-detail mountains from the playable square out to ~24 km. */
+  /**
+   * Horizon ring of mountains from the playable square out to ~24 km: concentric rings that start
+   * as the square's edge and morph into a circle, with spacing growing with distance (~80 m at the
+   * edge, a few hundred meters far out) so it is detailed where it meets the terrain and cheap
+   * where the fog hides it.
+   */
   function buildSkirtMesh(gl) {
-    var cells = Math.round(2 * SKIRT_OUTER / SKIRT_CELL), n = cells + 1;
-    var hs = new Float32Array(n * n);
-    var inner = half;
-    for (var iz = 0; iz < n; iz++) {
-      var z = -SKIRT_OUTER + iz * SKIRT_CELL;
-      for (var ix = 0; ix < n; ix++) {
-        var x = -SKIRT_OUTER + ix * SKIRT_CELL;
-        var h;
-        if (Math.abs(x) <= inner + 1 && Math.abs(z) <= inner + 1) {
-          // Boundary vertex: stay below the terrain edge over the whole adjacent span so the
-          // ring never pokes above the detailed terrain (no cracks, no overlap).
-          h = Infinity;
-          for (var k = -SKIRT_CELL; k <= SKIRT_CELL; k += cell) {
-            var sx = Math.abs(z) >= inner - 1 ? clamp(x + k, -inner, inner) : x;
-            var sz = Math.abs(z) >= inner - 1 ? z : clamp(z + k, -inner, inner);
-            h = Math.min(h, heightAt(sx, sz));
+    var M_ = 480, dth = Math.PI * 2 / M_;
+    var radii = [half], r = half, step = 90;
+    while (r < SKIRT_OUTER) {
+      step = Math.min(step * 1.12, 2.5 * r * dth);
+      r = Math.min(SKIRT_OUTER, r + step);
+      radii.push(r);
+    }
+    var K = radii.length, nv = K * M_;
+    var pos = new Float32Array(nv * 3), nrm = new Float32Array(nv * 3), col = new Float32Array(nv * 4);
+    var uv = new Float32Array(nv * 2), out = new Float64Array(6);
+    var k, j, i;
+    for (k = 0; k < K; k++) {
+      var rk = radii[k], f = sstep(half, SKIRT_OUTER * 0.8, rk);
+      for (j = 0; j < M_; j++) {
+        var th = j * dth, cth = Math.cos(th), sth = Math.sin(th);
+        var sq = rk / Math.max(Math.abs(cth), Math.abs(sth));   // on the square of half-size rk
+        var rad = sq + (rk - sq) * f;
+        var x = cth * rad, z = sth * rad, h;
+        if (k === 0) {
+          // on the terrain edge: stay below it across the neighbouring span, so the ring never
+          // pokes above the detailed terrain (no cracks, no overlap)
+          var x2 = Math.cos(th + dth) * half / Math.max(Math.abs(Math.cos(th + dth)), Math.abs(Math.sin(th + dth)));
+          var z2 = Math.sin(th + dth) * half / Math.max(Math.abs(Math.cos(th + dth)), Math.abs(Math.sin(th + dth)));
+          var x0 = Math.cos(th - dth) * half / Math.max(Math.abs(Math.cos(th - dth)), Math.abs(Math.sin(th - dth)));
+          var z0 = Math.sin(th - dth) * half / Math.max(Math.abs(Math.cos(th - dth)), Math.abs(Math.sin(th - dth)));
+          h = Math.min(heightAt(x, z), heightAt(x0, z0), heightAt(x2, z2));
+          for (var q = 1; q < 8; q++) {
+            h = Math.min(h, heightAt(x + (x2 - x) * q / 8, z + (z2 - z) * q / 8), heightAt(x + (x0 - x) * q / 8, z + (z0 - z) * q / 8));
           }
-          h -= 20;
+          h -= 12;
         } else {
           h = heightFn(x, z);
         }
-        hs[iz * n + ix] = h;
+        i = k * M_ + j;
+        pos[i * 3] = x; pos[i * 3 + 1] = h; pos[i * 3 + 2] = z;
       }
     }
-    var pos = [], nrm = [], col = [], uv = [], idx = [], out = new Float64Array(6);
-    for (iz = 0; iz < n; iz++) {
-      for (ix = 0; ix < n; ix++) {
-        x = -SKIRT_OUTER + ix * SKIRT_CELL; z = -SKIRT_OUTER + iz * SKIRT_CELL;
-        h = hs[iz * n + ix];
-        var nx = hs[iz * n + Math.max(ix - 1, 0)] - hs[iz * n + Math.min(ix + 1, cells)];
-        var nz = hs[Math.max(iz - 1, 0) * n + ix] - hs[Math.min(iz + 1, cells) * n + ix];
-        var ny = 2 * SKIRT_CELL, l = 1 / Math.hypot(nx, ny, nz);
-        pos.push(x, h, z);
-        nrm.push(nx * l, ny * l, nz * l);
-        surfaceColor(x, z, h, ny * l, 1, out);
-        col.push(out[0], out[1], out[2], out[3]);
-        uv.push(0, out[5]);
+    var idx = new Uint32Array((K - 1) * M_ * 6), n = 0;
+    for (k = 0; k < K - 1; k++) {
+      for (j = 0; j < M_; j++) {
+        var a = k * M_ + j, b = k * M_ + (j + 1) % M_, c = (k + 1) * M_ + j, d = (k + 1) * M_ + (j + 1) % M_;
+        // theta increases towards +z, rings grow outwards: (a, b, d) / (a, d, c) face up
+        idx[n++] = a; idx[n++] = b; idx[n++] = d; idx[n++] = a; idx[n++] = d; idx[n++] = c;
       }
     }
-    for (iz = 0; iz < cells; iz++) {
-      for (ix = 0; ix < cells; ix++) {
-        var cx = -SKIRT_OUTER + (ix + 0.5) * SKIRT_CELL, cz = -SKIRT_OUTER + (iz + 0.5) * SKIRT_CELL;
-        if (Math.abs(cx) < inner && Math.abs(cz) < inner) continue;
-        if (Math.hypot(cx, cz) > SKIRT_OUTER) continue;
-        var a = iz * n + ix, b = a + 1, c = a + n, d = a + n + 1;
-        idx.push(a, c, d, a, d, b);
+    // smooth normals from the faces, then colours
+    for (var t = 0; t < idx.length; t += 3) {
+      var ia = idx[t] * 3, ib = idx[t + 1] * 3, ic = idx[t + 2] * 3;
+      var e1x = pos[ib] - pos[ia], e1y = pos[ib + 1] - pos[ia + 1], e1z = pos[ib + 2] - pos[ia + 2];
+      var e2x = pos[ic] - pos[ia], e2y = pos[ic + 1] - pos[ia + 1], e2z = pos[ic + 2] - pos[ia + 2];
+      var nx = e1y * e2z - e1z * e2y, ny = e1z * e2x - e1x * e2z, nz = e1x * e2y - e1y * e2x;
+      for (var v = 0; v < 3; v++) {
+        var o = idx[t + v] * 3;
+        nrm[o] += nx; nrm[o + 1] += ny; nrm[o + 2] += nz;
       }
+    }
+    for (i = 0; i < nv; i++) {
+      var l = 1 / (Math.sqrt(nrm[i * 3] * nrm[i * 3] + nrm[i * 3 + 1] * nrm[i * 3 + 1] + nrm[i * 3 + 2] * nrm[i * 3 + 2]) || 1);
+      nrm[i * 3] *= l; nrm[i * 3 + 1] *= l; nrm[i * 3 + 2] *= l;
+      surfaceColor(pos[i * 3], pos[i * 3 + 2], pos[i * 3 + 1], nrm[i * 3 + 1], 1, out);
+      col[i * 4] = out[0]; col[i * 4 + 1] = out[1]; col[i * 4 + 2] = out[2]; col[i * 4 + 3] = Math.max(out[3], 0);
+      uv[i * 2] = 0; uv[i * 2 + 1] = out[5];
     }
     return RL.GL.createMesh(gl, { positions: pos, normals: nrm, colors: col, colorSize: 4, uvs: uv, indices: idx });
   }
@@ -726,9 +754,10 @@
   }
 
   // ------------------------------------------------------------------ the stone arch
-  var archInfo = null;
+  var archInfo = null, archGeo = null;
 
-  function buildArch(gl) {
+  /** Builds the arch geometry (kept in archGeo for the renderer), archInfo and its colliders. */
+  function buildArch() {
     var A = C.arch;
     var q = { d: 0, s: 0 };
     queryPath(canyonPl, A.x, A.z, 5, q);
@@ -793,11 +822,7 @@
       var ny = e1[2] * e2[0] - e1[0] * e2[2];
       if (ny < 0) for (t = 0; t < ind.length; t += 3) { var tmp = ind[t + 1]; ind[t + 1] = ind[t + 2]; ind[t + 2] = tmp; }
     }
-    var flat = RL.Geo.toFlat(geo);
-    archMesh = RL.GL.meshFromGeo(gl, flat, {
-      instances: { data: new Float32Array([0, 0, 0, 1, 0, 0, 0, 1]), stride: 8, count: 1,
-        attribs: [{ loc: 4, size: 4, offset: 0 }, { loc: 5, size: 4, offset: 4 }] }
-    });
+    archGeo = geo;
 
     // Sphere colliders along the band, each capped so it never reaches into the opening.
     var cols = [];
@@ -811,7 +836,7 @@
       for (var rw = 0; rw < rows; rw++) {
         var rf = (rw + 0.5) / rows;
         var cu = I[0] + (O[0] - I[0]) * rf, cv = I[1] + (O[1] - I[1]) * rf;
-        var rad = Math.min(bw / (2 * rows), th / 2 + 3);
+        var rad = Math.min(bw / (2 * rows) * 1.4, th / 2 + 3);   // rows overlap: no gaps
         // distance to the opening's parabola
         var dmin = Infinity;
         for (var j = 0; j <= 240; j++) {
@@ -871,13 +896,13 @@
     '  alb *= 1.0 + inz.x * inz.y * (stripe - 0.5) * 0.10 * (1.0 - smoothstep(400.0, 2500.0, dist));',
     '  // wildflowers sprinkled over lush meadows (near the camera only)',
     '  if (dist < 220.0 && v_mat.x > 0.2) {',
-    '    vec2 cp = v_pos.xz * 0.8;',
+    '    vec2 cp = v_pos.xz * 1.1;',
     '    vec2 ci = floor(cp);',
     '    float hh = hash12(ci + 17.0);',
     '    float patchN = vnoise(v_pos.xz * 0.03 + 11.0);',
     '    vec2 off = vec2(hash12(ci + 3.1), hash12(ci + 9.7)) * 0.6 + 0.2;',
-    '    float dot0 = smoothstep(0.2, 0.1, length(fract(cp) - off));',
-    '    float fl = dot0 * step(0.96 - 0.12 * patchN, hh) * smoothstep(0.5, 0.75, patchN) * v_mat.x;',
+    '    float dot0 = smoothstep(0.13, 0.07, length(fract(cp) - off));',
+    '    float fl = dot0 * step(0.9, hh) * smoothstep(0.55, 0.8, patchN) * v_mat.x;',
     '    fl *= 1.0 - smoothstep(120.0, 220.0, dist);',
     '    float hue = hash12(ci + 5.5);',
     '    vec3 fc = hue < 0.4 ? vec3(0.95, 0.85, 0.25) : (hue < 0.75 ? vec3(0.95, 0.95, 0.92) : vec3(0.62, 0.45, 0.85));',
@@ -989,6 +1014,30 @@
     return lm;
   }
 
+  /** Programs, meshes, vegetation and the arch mesh. Returns stage timings (ms). */
+  function buildRenderResources(gl, low, t0) {
+    var SL = RL.ShaderLib;
+    progTerrain = RL.GL.createProgram(gl, SL.vertex(TERRAIN_VS), SL.fragment(TERRAIN_FS), 'terrain');
+    progProps = RL.GL.createProgram(gl, SL.vertex(PROPS_VS), SL.fragment(PROPS_FS), 'terrainProps');
+    terrainMesh = buildTerrainMesh(gl);
+    var tMesh = performance.now();
+    skirtMesh = buildSkirtMesh(gl);
+    var tSkirt = performance.now();
+    var props = placeProps(low);
+    coniferMesh = instancedMesh(gl, coniferGeo(), props.con, props.nc);
+    broadleafMesh = instancedMesh(gl, broadleafGeo(), props.broad, props.nb);
+    boulderMesh = instancedMesh(gl, boulderGeo(), props.rock, props.nr);
+    Terrain.counts = { conifers: props.nc, broadleaf: props.nb, boulders: props.nr };
+    var tProps = performance.now();
+    if (archGeo) {
+      archMesh = RL.GL.meshFromGeo(gl, RL.Geo.toFlat(archGeo), {
+        instances: { data: new Float32Array([0, 0, 0, 1, 0, 0, 0, 1]), stride: 8, count: 1,
+          attribs: [{ loc: 4, size: 4, offset: 0 }, { loc: 5, size: 4, offset: 4 }] }
+      });
+    }
+    return { mesh: tMesh - t0, skirt: tSkirt - tMesh, props: tProps - tSkirt, arch: performance.now() - tProps };
+  }
+
   // ------------------------------------------------------------------ public API
   var Terrain = {
     ready: false,
@@ -1020,49 +1069,69 @@
       buildLayout();
       var tLayout = performance.now();
 
+      // Warm-up on a coarse grid that touches every branch (canyon, lake, airfield, beyond the
+      // edge) so the JIT optimises heightFn/surfaceColor once instead of deoptimising row by row.
+      var warm = new Float64Array(6);
+      for (var wz = -1.1; wz <= 1.1; wz += 0.05) {
+        for (var wx = -1.1; wx <= 1.1; wx += 0.05) {
+          var hw = heightFn(wx * half, wz * half);
+          surfaceColor(wx * half, wz * half, hw, 0.9, 1, warm);
+        }
+      }
+      for (var wt = 0; wt <= 1; wt += 0.02) {
+        var wp = pathPoint(canyonPl, wt * canyonPl.total, [0, 0]);
+        surfaceColor(wp[0], wp[1], heightFn(wp[0], wp[1]), 0.5, 1, warm);
+        surfaceColor(wp[0] + 150, wp[1], heightFn(wp[0] + 150, wp[1]), 0.3, 1, warm);
+      }
       data = new Float32Array(N * N);
       for (var iz = 0; iz < N; iz++) {
         var z = -half + iz * cell;
         for (var ix = 0; ix < N; ix++) data[iz * N + ix] = heightFn(-half + ix * cell, z);
+      }
+      // Split each cell along the diagonal whose corners are closest in height, so edges follow
+      // ridges, gullies and cliff lines instead of zig-zagging across them (ties: checkerboard).
+      diag = new Uint8Array(res * res);
+      for (iz = 0; iz < res; iz++) {
+        for (ix = 0; ix < res; ix++) {
+          var c0 = iz * N + ix;
+          var dAD = Math.abs(data[c0] - data[c0 + N + 1]), dBC = Math.abs(data[c0 + 1] - data[c0 + N]);
+          diag[iz * res + ix] = Math.abs(dAD - dBC) < 1e-3 ? ((ix + iz) & 1) : (dAD < dBC ? 0 : 1);
+        }
       }
       heightData = { data: data, res: res, half: half };
       Terrain.heightAt = heightAt;      // fast path once the data exists
       var tHeights = performance.now();
 
       glc = gl;
-      var low = res < 400;
-      if (gl) {
-        var SL = RL.ShaderLib;
-        progTerrain = RL.GL.createProgram(gl, SL.vertex(TERRAIN_VS), SL.fragment(TERRAIN_FS), 'terrain');
-        progProps = RL.GL.createProgram(gl, SL.vertex(PROPS_VS), SL.fragment(PROPS_FS), 'terrainProps');
-        terrainMesh = buildTerrainMesh(gl);
-        skirtMesh = buildSkirtMesh(gl);
-        var props = placeProps(low);
-        coniferMesh = instancedMesh(gl, coniferGeo(), props.con, props.nc);
-        broadleafMesh = instancedMesh(gl, broadleafGeo(), props.broad, props.nb);
-        boulderMesh = instancedMesh(gl, boulderGeo(), props.rock, props.nr);
-        Terrain.counts = { conifers: props.nc, broadleaf: props.nb, boulders: props.nr };
-        Terrain.colliders = buildArch(gl);
-      } else {
-        Terrain.colliders = [];
-      }
+      var low = res < 400, stages = null;
+      // Physical world first (needed by physics even if rendering fails below).
+      Terrain.colliders = buildArch();
       Terrain.arch = archInfo;
       Terrain.landmarks = buildLandmarks();
+      Terrain.res = res;
+      Terrain.ready = true;
+      if (gl) {
+        try {
+          stages = buildRenderResources(gl, low, tHeights);
+        } catch (e) {
+          console.error('[RL.Terrain] render setup failed:', e);
+          if (RL.errors) RL.errors.push('Terrain.init (render): ' + (e && e.message));
+          progTerrain = null;
+        }
+      }
       var fz = C.airfield.flatZone;
       flatZoneVec[0] = fz.minX; flatZoneVec[1] = fz.minZ; flatZoneVec[2] = fz.maxX; flatZoneVec[3] = fz.maxZ;
       var toRad = (C.wind.from + 180) * M.DEG, ws = clamp(C.wind.speed / 4, 0.3, 2.5);
       windVec[0] = Math.sin(toRad) * ws; windVec[1] = -Math.cos(toRad) * ws;
-      Terrain.res = res;
-      Terrain.ready = true;
       Terrain.initMs = performance.now() - t0;
-      Terrain.timings = { layout: tLayout - t0, heights: tHeights - tLayout, total: Terrain.initMs };
+      Terrain.timings = { layout: tLayout - t0, heights: tHeights - tLayout, stages: stages, total: Terrain.initMs };
     },
 
     getHeightData: function () { return heightData; },
 
     draw: function (frame) {
       var gl = glc;
-      if (!Terrain.ready || !gl || !progTerrain) return;
+      if (!Terrain.ready || !gl || !progTerrain || !terrainMesh) return;
       var G = RL.GL;
       G.use(gl, progTerrain);
       G.applyFrame(gl, progTerrain, frame);

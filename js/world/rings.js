@@ -331,6 +331,9 @@
   // ------------------------------------------------------------------ presentation state
   var guideData = new Float32Array(64 * 8);
   var guideCount = 0, guidePhase = 0;
+  // three subtle chevrons just past the final ring, pointing down the approach at the runway
+  var finalData = new Float32Array(3 * 8);
+  var finalCount = 0;
   var guideCol = v3.create();
 
   function targetColor(r, state) {
@@ -359,6 +362,27 @@
     }
     guidePhase += dt;
     buildGuide();
+    buildFinalMarks();
+  }
+
+  function buildFinalMarks() {
+    finalCount = 0;
+    var list = Rings.list, f = null;
+    for (var i = 0; i < list.length; i++) if (list[i].special === 'final') f = list[i];
+    // the regular guide already covers the final leg while the final ring is current
+    if (!f || f.passed || f === Rings.getCurrent()) return;
+    v3.sub(gD, Rings.runwayAim, f.pos);
+    var len = v3.length(gD);
+    if (len < 200) return;
+    v3.scale(gD, gD, 1 / len);
+    for (var k = 0; k < 3; k++) {
+      var s = 40 + k * 32, o = k * 8;
+      finalData[o] = f.pos[0] + gD[0] * s; finalData[o + 1] = f.pos[1] + gD[1] * s; finalData[o + 2] = f.pos[2] + gD[2] * s;
+      finalData[o + 3] = (0.3 + 0.2 * Math.sin(guidePhase * 3 - k * 0.9)) * f.glow * 2.5;
+      finalData[o + 4] = gD[0]; finalData[o + 5] = gD[1]; finalData[o + 6] = gD[2];
+      finalData[o + 7] = 3.6;
+      finalCount++;
+    }
   }
 
   /** Flowing chevrons from the current ring to the next one (or to the runway after the last). */
@@ -516,11 +540,19 @@
     '  float dist = length(toCam);',
     '  vec3 side = cross(d, toCam / max(dist, 1e-3));',
     '  float sl = length(side);',
-    '  side = sl > 1e-3 ? side / sl : vec3(1.0, 0.0, 0.0);',
+    '  vec3 camRight = vec3(u_view[0][0], u_view[1][0], u_view[2][0]);',
+    '  vec3 camUp = vec3(u_view[0][1], u_view[1][1], u_view[2][1]);',
+    '  vec3 camFwd = -vec3(u_view[0][2], u_view[1][2], u_view[2][2]);',
+    '  side = sl > 1e-3 ? side / sl : camRight;',
+    '  if (dot(side, camRight) < 0.0) side = -side;',
+    '  // seen end-on the leg collapses: fall back to a screen-facing chevron pointing',
+    '  // "into the screen" (up) when the leg leads away from the camera, down when it comes at it',
+    '  float w = smoothstep(0.2, 0.55, sl);',
+    '  vec3 ax = normalize(mix(camRight, side, w));',
+    '  vec3 ay = normalize(mix(dot(d, camFwd) >= 0.0 ? camUp : -camUp, d, w) + 1e-5);',
     '  float size = max(i_dir.w, dist * 0.0045);',
-    '  vec3 wp = i_pos.xyz + (side * a_position.x + d * a_position.y) * size;',
-    '  // seen end-on the chevron would collapse: fade it',
-    '  v_a = i_pos.w * smoothstep(0.15, 0.5, sl);',
+    '  vec3 wp = i_pos.xyz + (ax * a_position.x + ay * a_position.y) * size;',
+    '  v_a = i_pos.w;',
     '  v_q = a_position.xy; v_world = wp;',
     '  gl_Position = u_viewProj * vec4(wp, 1.0);',
     '}'
@@ -535,8 +567,9 @@
     '  float s = abs(v_q.y - (0.3 - abs(v_q.x) * 0.85));',
     '  float w = fwidth(s) + 1e-3;',
     '  float m = (1.0 - smoothstep(0.16 - w, 0.16 + w, s)) * (1.0 - smoothstep(0.78, 0.9, abs(v_q.x)));',
-    '  vec3 c = u_color * m * v_a * 0.9 * (1.0 - 0.5 * fogF(v_world));',
-    '  outColor = vec4(finalColor(c), 0.0);',
+    '  float k = m * v_a * (1.0 - 0.5 * fogF(v_world));',
+    '  // partly opaque so the trail still reads over bright grass / snow, glowing on top',
+    '  outColor = vec4(finalColor(u_color * 1.1) * k, k * 0.55);',
     '}'
   ].join('\n');
 
@@ -605,6 +638,7 @@
   var colBase = [0, 0, 0];
   var U_COLUMN = { u_base: colBase, u_height: COLUMN_HEIGHT, u_color: null, u_intensity: 0 };
   var U_GUIDE = { u_color: guideCol };
+  var U_FINAL = { u_color: COLORS.final };
   Rings.draw = function (frame) {
     if (!gl || !progRing || !Rings.list.length) return;
     var G = RL.GL, list = Rings.list;
@@ -666,6 +700,12 @@
       G.use(gl, progGuide, U_GUIDE);
       G.applyFrame(gl, progGuide, frame);
       G.drawMesh(gl, meshGuide, guideCount);
+    }
+    if (finalCount > 0 && progGuide) {
+      G.updateInstances(gl, meshGuide, finalData, finalCount);
+      G.use(gl, progGuide, U_FINAL);
+      G.applyFrame(gl, progGuide, frame);
+      G.drawMesh(gl, meshGuide, finalCount);
     }
 
     gl.depthMask(true);
