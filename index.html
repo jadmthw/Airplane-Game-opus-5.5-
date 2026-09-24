@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Ridgeline</title>
+  <meta name="description" content="Ridgeline: a WebGL flight game. Take off from a mountain valley airstrip, thread rings through a canyon, fly under a stone arch and land it smooth.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cpath d='M4 50 L22 22 L32 36 L42 18 L60 50 Z' fill='%23384a5c'/%3E%3Cpath d='M18 30 L46 30 L32 26 Z M30 26 L34 26 L33 14 L31 14 Z' fill='%23f4b942'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/base.css">
+  <link rel="stylesheet" href="css/ui.css">
+</head>
+<body>
+  <canvas id="gl" tabindex="0" aria-label="Ridgeline flight view"></canvas>
+  <canvas id="hud" aria-hidden="true"></canvas>
+  <div id="ui-root"></div>
+
+  <div id="loading">
+    <div class="loading-title">Ridgeline</div>
+    <div class="loading-sub">a valley flight</div>
+    <div class="loading-bar"><div id="loading-bar-fill"></div></div>
+    <div id="loading-msg" class="loading-msg">Loading…</div>
+  </div>
+
+  <noscript>
+    <div class="noscript">Ridgeline needs JavaScript and WebGL2 to fly.</div>
+  </noscript>
+
+  <!-- core -->
+  <script src="js/core/math.js"></script>
+  <script src="js/core/events.js"></script>
+  <script src="js/core/gl.js"></script>
+  <script src="js/core/shaderlib.js"></script>
+  <script src="js/core/geometry.js"></script>
+  <script src="js/config.js"></script>
+  <!-- world -->
+  <script src="js/world/world.js"></script>
+  <script src="js/world/atmosphere.js"></script>
+  <script src="js/world/noise.js"></script>
+  <script src="js/world/terrain.js"></script>
+  <script src="js/world/water.js"></script>
+  <script src="js/world/sky.js"></script>
+  <script src="js/world/airfield.js"></script>
+  <script src="js/world/rings.js"></script>
+  <!-- aircraft -->
+  <script src="js/aircraft/flightmodel.js"></script>
+  <script src="js/aircraft/model.js"></script>
+  <script src="js/aircraft/autopilot.js"></script>
+  <!-- effects -->
+  <script src="js/fx/particles.js"></script>
+  <script src="js/fx/effects.js"></script>
+  <script src="js/fx/shadow.js"></script>
+  <!-- input / camera / audio -->
+  <script src="js/io/input.js"></script>
+  <script src="js/io/camera.js"></script>
+  <script src="js/io/audio.js"></script>
+  <!-- game + ui -->
+  <script src="js/game/game.js"></script>
+  <script src="js/ui/hud.js"></script>
+  <script src="js/ui/ui.js"></script>
+  <!-- bootstrap -->
+  <script src="js/main.js"></script>
+</body>
+</html>

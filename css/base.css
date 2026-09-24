@@ -1,0 +1,101 @@
+/* Ridgeline — base layout (canvases, loading screen). UI overlays live in ui.css. */
+:root {
+  --rl-bg: #0d1620;
+  --rl-ink: #eef3f8;
+  --rl-accent: #f4b942;
+  --rl-muted: #9fb0c2;
+  --rl-font: "Segoe UI", system-ui, -apple-system, Roboto, "Helvetica Neue", Arial, sans-serif;
+  --rl-mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--rl-bg);
+  color: var(--rl-ink);
+  font-family: var(--rl-font);
+  -webkit-user-select: none;
+  user-select: none;
+  overscroll-behavior: none;
+}
+
+#gl, #hud {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  display: block;
+}
+
+#gl { z-index: 0; outline: none; cursor: crosshair; }
+#hud { z-index: 1; pointer-events: none; }
+
+#ui-root {
+  position: fixed;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none; /* children that need input set pointer-events: auto */
+}
+
+/* ------------------------------------------------------------ loading */
+#loading {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background:
+    radial-gradient(ellipse at 50% 120%, #2b4a66 0%, transparent 60%),
+    linear-gradient(180deg, #0b1320 0%, #1a2d42 70%, #2d4760 100%);
+  transition: opacity 0.6s ease;
+}
+#loading.done { opacity: 0; pointer-events: none; }
+#loading.fatal .loading-msg { color: #ffb4a8; max-width: 520px; text-align: center; line-height: 1.5; }
+
+.loading-title {
+  font-size: clamp(40px, 8vw, 84px);
+  font-weight: 800;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--rl-ink);
+  text-shadow: 0 4px 30px rgba(244, 185, 66, 0.25);
+}
+.loading-sub {
+  font-size: 15px;
+  letter-spacing: 0.4em;
+  text-transform: uppercase;
+  color: var(--rl-muted);
+  margin-bottom: 18px;
+}
+.loading-bar {
+  width: min(360px, 70vw);
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+#loading-bar-fill {
+  width: 0%;
+  height: 100%;
+  background: var(--rl-accent);
+  transition: width 0.2s ease;
+}
+.loading-msg {
+  font-size: 13px;
+  color: var(--rl-muted);
+  letter-spacing: 0.05em;
+  min-height: 1.4em;
+}
+
+.noscript {
+  position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+  background: var(--rl-bg); color: var(--rl-ink); font-size: 18px; z-index: 20;
+}
