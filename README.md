@@ -9,7 +9,9 @@ and sound are all generated in code. There's no build step and nothing is downlo
 
 ## Play
 
-Open `index.html` in a current desktop browser (Chrome, Edge, Firefox or Safari with WebGL2).
+Play in the browser: [https://jadmthw.github.io/Airplane-Game-opus-5.5-/](https://jadmthw.github.io/Airplane-Game-opus-5.5-/)
+
+To play locally, open `index.html` in a current desktop browser (Chrome, Edge, Firefox or Safari with WebGL2).
 Double-clicking the file works, and so does any static server, for example
 `npx http-server .` or `python3 -m http.server`.
 
