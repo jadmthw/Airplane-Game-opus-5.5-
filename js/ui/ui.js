@@ -577,6 +577,11 @@
     if (crashReady !== last.crashReady) {
       el.crash.classList.toggle('ready', crashReady);
       last.crashReady = crashReady;
+      if (crashReady) {
+        el.crashPrompt.innerHTML = G.crash.afterCourse
+          ? 'Course complete! Press <kbd>R</kbd> or click to retry the landing'
+          : 'Press <kbd>R</kbd> or click to respawn';
+      }
     }
     show(el.results, showResults);
     el.results.classList.toggle('interactive', state === 'paused' || !(RL.Input && RL.Input.pointerLocked));

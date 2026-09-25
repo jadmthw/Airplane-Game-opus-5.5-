@@ -202,7 +202,7 @@
     v3.set(p.angVel, 0, 0, 0);
     p.surfaces.aileron = 0; p.surfaces.elevator = 0; p.surfaces.rudder = 0;
     p.stall = false; p.stallWarning = 0; p.stallProtect = 0; p.brake = 0; p.smoke = false; p.time = 0;
-    p.flapsNotch = 0; p.flaps = 0; p.steer = 0; p.overspeed = 0;
+    p.flapsNotch = 0; p.flaps = 0; p.steer = 0; p.overspeed = 0; p._handsOff = 0;
     p._bounced = false; p._sinceTouchdown = 99; p._colT = -1;
     var onGround = spawn.onGround !== false && spawn.y === undefined;
     if (onGround) {
@@ -461,12 +461,14 @@
     // except near the ground (lowF), where holding the stick back must give a climb, not a
     // stall onto the runway. Scaled with the prop-blown dynamic pressure so it matches the
     // elevator it is working against. Exposed as plane.stallProtect for the warnings.
-    var lim = Math.max(hold, lowF);
+    // Only meaningful with air arriving over the nose: parked or taxiing downwind, AoA reads
+    // about +/-180 deg and an unbounded correction would stand the aeroplane on its tail.
+    var lim = Math.max(hold, lowF * M.smoothstep(3, 8, -vb[2]));
     p.stallProtect = lim;
     if (lim > 0) {
       var aHi = aS - 1.5 * DEG, aLo = P.alphaStallNeg + 1.5 * DEG;
-      if (alpha > aHi) angAcc[0] -= lim * qnT * P.kAlpha * 3 * (alpha - aHi);
-      else if (alpha < aLo) angAcc[0] -= lim * qnT * P.kAlpha * 3 * (alpha - aLo);
+      if (alpha > aHi) angAcc[0] -= lim * qnT * P.kAlpha * 3 * Math.min(alpha - aHi, 10 * DEG);
+      else if (alpha < aLo) angAcc[0] -= lim * qnT * P.kAlpha * 3 * Math.max(alpha - aLo, -10 * DEG);
     }
     // in a stall the wing drops toward the slip side (gently, this is a forgiving aeroplane)
     var drop = airborne ? stallAmt * qn * (5 * sb + 0.5 * Math.sin(p.time * 1.7)) : 0;
@@ -476,6 +478,15 @@
     // turn the aeroplane off the runway during a hands-off takeoff roll)
     angAcc[1] = -qnT * P.kRud * ru - qn * P.kBeta * sb * (airborne ? 1 : 0.35) -
       (P.dampYaw0 + P.dampYaw * sq) * (w[1] - pathYaw);
+    // Hands-off in a steep-bank dive: roll gently back toward wings-level so the path-return
+    // augmentation can pull out, instead of the dive tightening into a spiral past VNE. Stops
+    // short of ~120 deg of bank so inverted recoveries (which pull through) are left alone.
+    if (airborne && Math.abs(el) < 0.05 && Math.abs(ai) < 0.05) p._handsOff = (p._handsOff || 0) + dt;
+    else p._handsOff = 0;
+    var absRoll = Math.abs(p.roll);
+    if (p._handsOff > 1 && p.pitch < -15) {
+      angAcc[2] += Math.sign(p.roll) * qn * 1.5 * M.smoothstep(20, 45, absRoll) * (1 - M.smoothstep(112, 122, absRoll));
+    }
     if (p.overspeed > 0) {
       // buffet
       angAcc[0] += p.overspeed * 3 * Math.sin(p.time * 37);

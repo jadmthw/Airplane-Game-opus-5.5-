@@ -138,7 +138,7 @@
     popups: [],                       // [{active, text, sub, points, kind, age, life}]
     hint: { text: '', age: 0, id: '' },
     warnings: { stall: false, pullUp: false, overspeed: false, gear: false, bounds: false, boundsDist: 0 },
-    crash: { reason: '', label: '', tip: '', t: 0, ready: false },
+    crash: { reason: '', label: '', tip: '', t: 0, ready: false, afterCourse: false },
     lastLanding: null,               // {grade, label, points, fpm, offset, heading, bounced, age}
     stunts: [],                       // names of stunts flown this course
     results: null,                    // set when the course ends with a full-stop landing
@@ -198,6 +198,38 @@
     if (was === 'paused' && RL.Input && RL.Input.requestPointerLock) RL.Input.requestPointerLock();
   }
 
+  // After a crash: if the course was already complete (the crash was on the way home), put the
+  // aircraft back on final instead of throwing the whole run away; otherwise a normal respawn.
+  function retry() {
+    if (Game.crash.afterCourse) respawnOnFinal();
+    else respawn();
+  }
+
+  /** Back on a 3-degree final to runway 36 with gear down, keeping the finished course and score. */
+  function respawnOnFinal() {
+    resetTrackers();
+    st.autoTrimmed = true;
+    pendingTD = null;
+    acc = 0;
+    Game.crash.reason = ''; Game.crash.label = ''; Game.crash.tip = ''; Game.crash.t = 0;
+    Game.crash.ready = false; Game.crash.afterCourse = false;
+    var w = Game.warnings;
+    w.stall = w.pullUp = w.overspeed = w.gear = w.bounds = false; w.boundsDist = 0;
+    hideHint();
+    if (Game.plane && RL.FlightModel) {
+      RL.FlightModel.reset(Game.plane, {
+        x: C.airfield.runway.cx, y: C.airfield.elevation + 90, z: 2300, heading: 0,
+        speed: 45, onGround: false, gearDown: true
+      });
+    }
+    lastPlaneTime = 0;
+    if (RL.Input && RL.Input.setThrottle) RL.Input.setThrottle(0.35);
+    Game.state = 'playing';
+    closeHelp();
+    emit('respawn', {});
+    message('Back on final: have another go at the landing', 'info', 3);
+  }
+
   // Starting or respawning must never leave the help overlay over live flight. Called after the
   // state is already 'playing', so toggleHelp only closes the panel (no pause/resume side effects).
   function closeHelp() {
@@ -221,6 +253,7 @@
     Game.combo.count = 0; Game.combo.mult = 1; Game.combo.timer = 0; comboTimer = 0;
     for (var i = 0; i < Game.popups.length; i++) Game.popups[i].active = false;
     Game.crash.reason = ''; Game.crash.label = ''; Game.crash.tip = ''; Game.crash.t = 0; Game.crash.ready = false;
+    Game.crash.afterCourse = false;
     var w = Game.warnings;
     w.stall = w.pullUp = w.overspeed = w.gear = w.bounds = false; w.boundsDist = 0;
     pendingTD = null;
@@ -298,7 +331,7 @@
         // Enter on the title with help open just closes help (the player was reading it)
         if (s === 'title') { if (RL.UI && RL.UI.helpOpen && RL.UI.toggleHelp) RL.UI.toggleHelp(); else start(); }
         else if (s === 'paused') setPaused(false);
-        else if (s === 'crashed' && Game.crash.ready) respawn();
+        else if (s === 'crashed' && Game.crash.ready) retry();
         else if (s === 'playing' && Game.results && !Game.results.dismissed) dismissResults();
         break;
       case 'pause':
@@ -308,6 +341,7 @@
         break;
       case 'reset':
         if (s === 'title') start();
+        else if (s === 'crashed') retry();
         else respawn();
         break;
       case 'flaps':
@@ -531,6 +565,11 @@
           emit('liftoff', { speed: fin(ev.speed, p.airspeed), label: 'Liftoff' });
           st.liftoffAt = Game.flightTime;
           st.stalledSinceLiftoff = false;
+          // The augmentation returns a hands-off path to level, and the valley floor rises ahead
+          // of the runway: one notch of nose-up trim on the first liftoff keeps a newcomer who
+          // lets go climbing gently (the player can re-trim with [ / ] or X).
+          if (!st.autoTrimmed && RL.Input && RL.Input.trim === 0) { RL.Input.trim = 0.04; }
+          st.autoTrimmed = true;
           if (pendingTD) {
             if (pendingTD.roll > 0.8) finishLanding(true);
             else pendingTD = null;
@@ -581,11 +620,16 @@
       var n = W.normalAt(p.pos[0], p.pos[2], tA);
       if (n && n[1] > 0.93 && p.pos[1] < 400) txt = CRASH_TEXT.groundHit;
     }
+    var FMs = RL.FlightModel && RL.FlightModel.specs;
+    if (reason === 'bellyLanding' && (fin(p.throttle, 0) > 0.6 || (FMs && fin(speed, 0) > 1.6 * FMs.vStall))) {
+      txt = CRASH_TEXT.groundHit;            // under power or fast: flew into the ground, gear up
+    }
     if ((reason === 'hardLanding' || reason === 'terrain') && st && st.stalledSinceLiftoff &&
         Game.flightTime - st.liftoffAt < 15) {
       txt = CRASH_TEXT.climbStall;           // the real lesson is the over-rotation, not the flare
     }
     Game.state = 'crashed';
+    Game.crash.afterCourse = Game.course.state === 'done' && !Game.results;
     Game.crash.reason = reason;
     Game.crash.label = txt[0];
     Game.crash.tip = txt[1];
@@ -686,7 +730,8 @@
     if (p.onGround && p.groundSpeed < 1.0) finishLanding(false);
     else if (p.onGround && p.groundSpeed > 10 && !st.brakeHintShown && pendingTD && pendingTD.roll > 1.5) {
       st.brakeHintShown = true;
-      showHint('brake', 'Nice! Throttle to idle and hold [Space] to brake', 5);
+      var nice = pendingTD.onRunway && !pendingTD.bounced && GRADE_ORDER.indexOf(gradeLanding(pendingTD).grade) <= 1;
+      showHint('brake', (nice ? 'Nice! ' : '') + 'Throttle to idle and hold [Space] to brake', 5);
     }
   }
 
@@ -921,9 +966,9 @@
   // the mouse is really flying.
   function rotateText() {
     var I = RL.Input || {};
-    if (!mouseFlying()) return 'At 60 kt hold [↓] until the nose is about 10° up, then let go and let her climb';
+    if (!mouseFlying()) return 'At 60 kt hold [↓] until the nose is about 10° up, then keep a light pull (or tap ] for nose-up trim) to climb';
     var dir = I.settings && I.settings.invertPitch ? 'forward' : 'back';
-    return 'At 60 kt ease the mouse ' + dir + ' (or hold [↓]): nose up about 10°, then let her climb';
+    return 'At 60 kt ease the mouse ' + dir + ' (or hold [↓]): nose up about 10°, then keep a little back pressure to climb';
   }
   function steerText() {
     return 'Keep her on the centreline: steer with [A] / [D]' + (mouseFlying() ? ' or the mouse' : '');

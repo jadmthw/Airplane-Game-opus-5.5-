@@ -287,6 +287,7 @@
     }
     ctx.globalAlpha = alpha;
     ctx.restore();                                  // drop the aircraft hole (markers go on top)
+    shadowOn(3);                                    // the restore also dropped the shadow
 
     // boresight: where the nose points
     var f = p.forward;
@@ -349,7 +350,7 @@
   /** Does the boresight or flight path marker (as drawAttitude places them) touch this box? */
   function markerNear(p, l, t, r, b) {
     var mode = RL.frame.cameraMode || (RL.CameraRig && RL.CameraRig.mode) || 'chase';
-    if (mode !== 'chase' && mode !== 'cockpit') return false;
+    if (mode !== 'chase') return false;             // the only view that draws these markers
     var f = p.forward, v = p.vel, sp = Math.hypot(v[0], v[1], v[2]);
     if (projectDir(f[0], f[1], f[2], clipC) && boxHit(clipC[0], clipC[1], 21 * S, 7 * S, l, t, r, b)) return true;
     return sp > 6 && !p.onGround && projectDir(v[0] / sp, v[1] / sp, v[2] / sp, clipC) &&

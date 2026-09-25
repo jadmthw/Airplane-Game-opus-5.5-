@@ -268,7 +268,12 @@
       handleInternal(action);
       return;
     }
-    if (action === 'start' && lockSupported && Input.mouseFlight && gameState() !== 'playing') {
+    // (not when this Enter only closes help on the title, or the crash prompt isn't up yet: the
+    // state stays put, so the capture would never be released)
+    var st = gameState();
+    var noStart = (st === 'title' && RL.UI && RL.UI.helpOpen) ||
+      (st === 'crashed' && RL.Game && RL.Game.crash && !RL.Game.crash.ready);
+    if (action === 'start' && lockSupported && Input.mouseFlight && st !== 'playing' && !noStart) {
       // Enter is a user gesture: grab the mouse now so flight can begin immediately.
       requestPointerLock(true);
     }

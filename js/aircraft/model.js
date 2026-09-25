@@ -825,7 +825,7 @@
       '    c = mix(c, vec3(0.95, 0.8, 0.1), arcBand(q, r, aKt(VNO), aKt(VNE), 0.75, 0.83));',
       '    c = mix(c, RDL, radial(q, r, aKt(VNE), 0.68, 0.035));',
       '    ink = max(ticks(q, r, aKt(40.0), aKt(10.0), 19.0, 0.84, 0.018), ticks(q, r, aKt(50.0), aKt(50.0), 4.0, 0.7, 0.035));',
-      '    ink = max(ink, labels(q, aKt(50.0), aKt(50.0), 4.0, 0.5, 0.075, 5, 5));',
+      '    ink = max(ink, labels(q, aKt(50.0), aKt(50.0), 4.0, 0.48, 0.055, 5, 5));',
       '    ndl = needle(q, aKt(u_inst[0]), 0.82, 0.065);',
       '  } else if (type == 1) {',                         // attitude
       '    float pit = u_inst[1], rol = u_inst[2];',
@@ -847,7 +847,7 @@
       '    lit = max(max(0.35 * (1.0 - aa(0.92, r)), sym), ink); ink = 0.0;',
       '  } else if (type == 2) {',                         // altimeter, feet
       '    ink = max(ticks(q, r, 0.0, TAU / 50.0, 50.0, 0.83, 0.018), ticks(q, r, 0.0, TAU / 10.0, 10.0, 0.7, 0.035));',
-      '    ink = max(ink, labels(q, 0.0, TAU / 10.0, 10.0, 0.56, 0.07, 0, 1));',
+      '    ink = max(ink, labels(q, 0.0, TAU / 10.0, 10.0, 0.55, 0.05, 0, 1));',
       '    ndl = max(needle(q, fract(u_inst[3] / 1000.0) * TAU, 0.8, 0.055), needle(q, fract(u_inst[3] / 10000.0) * TAU, 0.48, 0.1));',
       '  } else if (type == 3) {',                         // G meter: 0 g at 9 o\'clock, 30 deg per g
       '    float stp = PI / 6.0;',
@@ -1083,7 +1083,7 @@
     '  vec3 toCam = u_camPos - i_posSize.xyz;',
     '  float dist = length(toCam);',
     '  // keep a minimum on-screen size so distant lights stay visible points',
-    '  float pix = 2.0 * dist * tan(0.5 * 1.1) / u_resolution.y;',
+    '  float pix = 2.0 * dist / (u_proj[1][1] * u_resolution.y);',   // world size of one pixel at this FOV
     '  float size = max(i_posSize.w, pix * 3.5);',
     '  vec3 c = i_posSize.xyz + toCam / max(dist, 1e-3) * min(0.35, dist * 0.3);',
     '  vec3 w = c + (camRight * a_position.x + camUp * a_position.y) * size;',
