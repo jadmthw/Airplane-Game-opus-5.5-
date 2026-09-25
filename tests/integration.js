@@ -158,7 +158,7 @@ async function run() {
     if (shotsDir) {
       await page.evaluate(() => { RL.debug.freeze = false; });
       await page.waitForTimeout(1500);
-      await page.screenshot({ path: path.join(shotsDir, 'takeoff-climb.png') });
+      await page.screenshot({ path: path.join(shotsDir, 'takeoff-climb.png'), timeout: 180000 });
       await page.evaluate(() => { RL.debug.freeze = true; });
     }
   }
@@ -167,7 +167,8 @@ async function run() {
   if (want('envelope')) {
     const e = await page.evaluate(() => {
       T.reset();
-      RL.debug.teleport(0, 900, 0, 0, 60);
+      // start well south so two minutes of northbound flight stays inside the map
+      RL.debug.teleport(0, 900, 4500, 0, 60);
       var p = RL.Game.plane, out = {};
       if (p.gearDown) RL.Game.handleAction('gear');
       // level cruise at 75% throttle: hold altitude with a simple P loop on pitch
@@ -301,12 +302,11 @@ async function run() {
       out.terrain = { crashed: RL.Game.plane.crashed, reason: RL.Game.plane.crashReason, state: RL.Game.state, events: ev.length };
       // hard landing: drop onto the runway at 7 m/s
       T.reset(); T.events.length = 0;
-      RL.debug.teleport(0, RL.Config.airfield.elevation + 12, 200, 0, 35);
+      RL.debug.teleport(0, RL.Config.airfield.elevation + 12, 200, 0, 35, true);
       var p = RL.Game.plane;
-      if (!p.gearDown) RL.Game.handleAction('gear');
       p.vel[1] = -9;
       T.step({ throttle: 0, pitch: 0, roll: 0, yaw: 0 }, 5);
-      out.hard = { crashed: p.crashed, reason: p.crashReason };
+      out.hard = { crashed: p.crashed, reason: p.crashReason, gear: p.gear };
       // water
       T.reset(); T.events.length = 0;
       var L = RL.Config.water.lakes[0];
@@ -319,7 +319,7 @@ async function run() {
       return out;
     });
     record('crash: mountain', k.terrain.crashed && k.terrain.state === 'crashed' && k.terrain.events === 1, JSON.stringify(k.terrain));
-    record('crash: hard landing', k.hard.crashed, JSON.stringify(k.hard));
+    record('crash: hard landing (gear down)', k.hard.crashed && k.hard.reason === 'hardLanding', JSON.stringify(k.hard));
     record('crash: water', k.water.crashed && k.water.reason === 'water', JSON.stringify(k.water));
     record('crash: respawn', k.respawn.state === 'playing' && k.respawn.onGround && !k.respawn.crashed, JSON.stringify(k.respawn));
   }
@@ -361,13 +361,13 @@ async function run() {
       if (name === 'title') {
         const p2 = await newPage(browser, 'noaudio&quality=' + quality);
         await p2.page.waitForTimeout(1500);
-        await p2.page.screenshot({ path: path.join(shotsDir, 'title.png') });
+        await p2.page.screenshot({ path: path.join(shotsDir, 'title.png'), timeout: 180000 });
         await p2.page.close();
         continue;
       }
       await page.evaluate(js);
       await page.waitForTimeout(2500);
-      await page.screenshot({ path: path.join(shotsDir, name + '.png') });
+      await page.screenshot({ path: path.join(shotsDir, name + '.png'), timeout: 180000 });
       await page.evaluate("RL.debug.freeze=true; RL.Atmosphere.set('day', true);");
     }
     console.log('screenshots in ' + shotsDir);

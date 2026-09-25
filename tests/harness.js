@@ -88,7 +88,7 @@ for (let i = 0; i < args.length; i++) {
       await page.mouse.click(x, y);
     }
     if (s.shot) {
-      await page.screenshot({ path: s.shot });
+      await page.screenshot({ path: s.shot, timeout: 180000 });
       console.log('shot> ' + s.shot);
     }
   }

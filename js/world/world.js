@@ -49,12 +49,20 @@
       return n[1] > 0.96 ? 'grass' : 'rough';
     },
 
-    /** All static colliders: [{type:'box', min, max, name} | {type:'sphere', center, radius, name}]. */
+    /**
+     * All static colliders: [{type:'box', min, max, name} | {type:'sphere', center, radius, name}].
+     * The combined array is cached (colliders are static); it is rebuilt only when a source list
+     * is replaced or changes length. Treat the result as read-only.
+     */
     getColliders: function () {
-      var list = [];
-      if (RL.Terrain && RL.Terrain.colliders) list = list.concat(RL.Terrain.colliders);
-      if (RL.Airfield && RL.Airfield.colliders) list = list.concat(RL.Airfield.colliders);
-      return list;
+      var t = RL.Terrain && RL.Terrain.colliders, a = RL.Airfield && RL.Airfield.colliders;
+      if (!colliderCache || t !== cacheT || a !== cacheA ||
+          (t ? t.length : 0) !== cacheTLen || (a ? a.length : 0) !== cacheALen) {
+        colliderCache = [].concat(t || [], a || []);
+        cacheT = t; cacheA = a;
+        cacheTLen = t ? t.length : 0; cacheALen = a ? a.length : 0;
+      }
+      return colliderCache;
     },
 
     /** Returns the first collider containing point p (v3), or null. */
@@ -120,5 +128,6 @@
   };
 
   var tmpN = RL.v3.create();
+  var colliderCache = null, cacheT = null, cacheA = null, cacheTLen = 0, cacheALen = 0;
   RL.World = World;
 })(window.RL = window.RL || {});

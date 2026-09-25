@@ -400,12 +400,12 @@
       };
     },
 
-    /** Place the aircraft in the air: teleport(x, y, z, headingDeg, speed). */
-    teleport: function (x, y, z, heading, speed) {
+    /** Place the aircraft in the air: teleport(x, y, z, headingDeg, speed, gearDown). */
+    teleport: function (x, y, z, heading, speed, gearDown) {
       if (RL.Game && RL.Game.state !== 'playing' && RL.Game.start) RL.Game.start();
       var p = getPlane();
       if (!p || !RL.FlightModel) return false;
-      RL.FlightModel.reset(p, { x: x, y: y, z: z, heading: heading || 0, speed: speed || 55, onGround: false });
+      RL.FlightModel.reset(p, { x: x, y: y, z: z, heading: heading || 0, speed: speed || 55, onGround: false, gearDown: !!gearDown });
       return true;
     },
 
