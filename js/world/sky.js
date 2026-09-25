@@ -1,7 +1,8 @@
 /*
  * Ridgeline — RL.Sky: the sky dome and the clouds.
  *
- * draw(frame): full-screen triangle; view rays reconstructed from u_invViewProj. skyColor() from
+ * draw(frame): full-screen triangle at the far plane, drawn after the opaque geometry with the
+ *   depth test on so it only fills the background; view rays reconstructed from u_invViewProj. skyColor() from
  *   the shared shader lib, a crisp sun disc with bloom (by night u_sunDir is the moon: a cratered,
  *   gibbous moon with a halo), procedural stars with twinkle and a faint milky way.
  * drawClouds(frame): cumulus built from camera-facing puffs (procedural texture atlas made once),
@@ -341,11 +342,11 @@
       if (!gl || !skyProg) return;
       RL.GL.use(gl, skyProg);
       RL.GL.applyFrame(gl, skyProg, frame);
-      gl.disable(gl.DEPTH_TEST);
+      // Drawn after the opaque geometry at depth 1.0 with the depth test on (LEQUAL), so it
+      // only shades pixels that still hold the cleared far depth.
       gl.depthMask(false);
       RL.GL.drawFullscreenTriangle(gl);
       gl.depthMask(true);
-      gl.enable(gl.DEPTH_TEST);
     },
 
     drawClouds: function (frame) {

@@ -15,17 +15,18 @@
   var PRESETS = {
     dawn: {
       label: 'Dawn',
-      sunDir: sunDir(80, 7),
+      // Low sun straight down the open valley (south) so it clears the ridges.
+      sunDir: sunDir(182, 9),
       sunColor: [2.7, 1.85, 1.2],
       ambientSky: [0.24, 0.26, 0.36],
       ambientGround: [0.09, 0.08, 0.08],
       skyZenith: [0.16, 0.24, 0.48],
       skyHorizon: [0.92, 0.68, 0.56],
       fogColor: [0.78, 0.66, 0.64],
-      fogDensity: 3.2e-4,
-      fogHeightFalloff: 1 / 320,
+      fogDensity: 1.4e-4,
+      fogHeightFalloff: 1 / 700,
       nightFactor: 0.15,
-      exposure: 1.1
+      exposure: 1.2
     },
     day: {
       label: 'Midday',
@@ -43,17 +44,19 @@
     },
     sunset: {
       label: 'Sunset',
-      sunDir: sunDir(282, 5),
-      sunColor: [3.0, 1.55, 0.65],
-      ambientSky: [0.22, 0.20, 0.30],
+      // Low sun up the open valley (north): the ridge there is under 2.5 deg, so the disc and
+      // its glow stay visible and the valley floor still catches warm direct light.
+      sunDir: sunDir(5, 10),
+      sunColor: [3.3, 1.8, 0.85],
+      ambientSky: [0.30, 0.29, 0.42],
       ambientGround: [0.10, 0.07, 0.06],
       skyZenith: [0.11, 0.14, 0.36],
       skyHorizon: [0.98, 0.50, 0.28],
-      fogColor: [0.72, 0.44, 0.34],
-      fogDensity: 2.0e-4,
-      fogHeightFalloff: 1 / 600,
+      fogColor: [0.82, 0.55, 0.42],
+      fogDensity: 1.2e-4,
+      fogHeightFalloff: 1 / 700,
       nightFactor: 0.3,
-      exposure: 1.1
+      exposure: 1.2
     },
     night: {
       label: 'Night',

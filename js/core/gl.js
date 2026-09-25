@@ -342,11 +342,13 @@
     if (GL._dummyShadow) return GL._dummyShadow;
     var t = GL.createShadowTarget(gl, 1);
     if (!t) return null;
+    var vp = gl.getParameter(gl.VIEWPORT);
     gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbo);
     gl.viewport(0, 0, 1, 1);
     gl.clearDepth(1.0);
     gl.clear(gl.DEPTH_BUFFER_BIT);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(vp[0], vp[1], vp[2], vp[3]);
     GL._dummyShadow = t.texture;
     return t.texture;
   };

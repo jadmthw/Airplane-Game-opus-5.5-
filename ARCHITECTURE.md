@@ -84,8 +84,10 @@ This file is the contract between modules. **Read it fully before touching any f
   `waterLevel`.
 * `RL.Atmosphere` (`js/world/atmosphere.js`): time-of-day presets `day, sunset, night, dawn`,
   `params` (current interpolated lighting, linear colors, `nightFactor` 0..1), `cycle()`.
-* `RL.Params`: URL flags `autostart`, `quality=low`, `debug`, `time=<preset>`, `noaudio`,
-  `camera=<mode>`.
+* `RL.Params`: URL flags `autostart`, `quality=low|high`, `debug`, `time=<preset>`, `noaudio`,
+  `camera=<mode>`. Without a `quality` flag the player's saved choice (localStorage
+  `ridgeline.quality`, set from the pause menu) applies, else high. The WebGL canvas renders at
+  up to 1.5x device pixels (1x on low); the HUD canvas at up to 2x.
 
 ## The frame object (built by main.js every frame)
 
@@ -121,9 +123,10 @@ Every frame:
    `CameraRig.update(realDt, plane, RL.Input, gameState)`.
 3. Build frame. Shadow pass: `Aircraft.getShadowCasters(plane)` → `Shadow.render(frame,
    casters, plane.pos)`.
-4. Opaque: `Sky.draw`, `Terrain.draw`, `Airfield.draw`, `Aircraft.draw(frame, plane, opts)`,
-   `Effects.draw`. Transparent: `Water.draw`, `Rings.draw`, `Sky.drawClouds`, `Particles.draw`,
-   `Airfield.drawLights`, `Aircraft.drawLights(frame, plane, opts)`.
+4. Opaque: `Terrain.draw`, `Airfield.draw`, `Aircraft.draw(frame, plane, opts)`,
+   `Effects.draw`, then `Sky.draw` (full-screen at depth 1.0 with the depth test on, so it only
+   fills the background). Transparent: `Water.draw`, `Rings.draw`, `Sky.drawClouds`,
+   `Particles.draw`, `Airfield.drawLights`, `Aircraft.drawLights(frame, plane, opts)`.
    `opts = { cockpit: bool, crashed: bool, hidden: bool }`.
 5. `HUD.draw(realDt)`, `Audio.update(realDt, plane, controls, {state, cameraMode})`.
 
@@ -192,6 +195,7 @@ brake 0..1, onGround bool, wheelsOnGround 0..3,
 airspeed (m/s TAS along-velocity vs air), groundSpeed, verticalSpeed (m/s, +up),
 altitude (= pos.y), agl (above terrain/water under the plane), aoa (rad), slip (rad),
 gForce (load factor), stall bool, stallWarning 0..1,
+stallProtect 0..1 (how hard the soft AoA limiter is holding; high = protected, not stalling),
 heading/pitch/roll (degrees; roll + = right wing down),
 surfaces {aileron, elevator, rudder} (-1..1 smoothed deflections for the model),
 crashed bool, crashReason string, smoke bool, time (s since reset)
@@ -262,7 +266,7 @@ crashed bool, crashReason string, smoke bool, time (s since reset)
 |---|---|
 | Mouse move (pointer locked) | Virtual stick: pitch / roll |
 | Mouse wheel | Throttle |
-| Left mouse (hold) | Skywriting smoke |
+| Left mouse / Shift (hold) | Skywriting smoke |
 | Right mouse (hold) + move | Free look |
 | Middle click / X | Center the stick |
 | W / S | Throttle up / down |

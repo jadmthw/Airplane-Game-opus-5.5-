@@ -9,9 +9,20 @@
 
   // ------------------------------------------------------------------ params
   var qs = new URLSearchParams(window.location.search);
+
+  // Graphics quality: the URL wins (tests rely on it), then the player's saved choice
+  // (the pause menu's Graphics toggle writes it and reloads), else high.
+  function storedQuality() {
+    try {
+      var q = window.localStorage.getItem('ridgeline.quality');
+      return q === 'low' || q === 'high' ? q : null;
+    } catch (e) { return null; }
+  }
+  var urlQuality = qs.get('quality');
+
   RL.Params = {
     autostart: qs.has('autostart'),
-    quality: qs.get('quality') === 'low' ? 'low' : 'high',
+    quality: (urlQuality === 'low' || urlQuality === 'high' ? urlQuality : storedQuality()) || 'high',
     debug: qs.has('debug'),
     time: qs.get('time'),
     noaudio: qs.has('noaudio'),
@@ -46,6 +57,8 @@
   // ------------------------------------------------------------------ state
   var gl, canvas, hudCanvas;
   var width = 1, height = 1, dpr = 1;
+  var contextLost = false;
+  var lowFpsTime = 0, lowFpsHinted = false;
   var lastNow = 0, worldTime = 0, realTime = 0;
   var fpsAccum = 0, fpsFrames = 0;
   var defaultControls = { pitch: 0, roll: 0, yaw: 0, throttle: 0, brake: 0, smoke: false };
@@ -87,6 +100,8 @@
     var el = document.getElementById('loading');
     if (el) {
       el.classList.add('fatal');
+      el.classList.remove('done');
+      el.style.display = '';
       el.innerHTML = '<div class="loading-title">Ridgeline</div><div class="loading-msg">' + msg + '</div>';
     }
     console.error('[RL] fatal:', msg);
@@ -100,18 +115,22 @@
   }
 
   function resize() {
-    dpr = Math.min(window.devicePixelRatio || 1, RL.Params.quality === 'low' ? 1 : 2);
+    var deviceRatio = window.devicePixelRatio || 1;
+    // The 3D view is capped at 1.5x (MSAA is on, and 2x on a HiDPI laptop is 4x the pixels
+    // for little visible gain); the 2D HUD is cheap, so it stays crisp at up to 2x.
+    dpr = Math.min(deviceRatio, RL.Params.quality === 'low' ? 1 : 1.5);
+    var hudDpr = Math.min(deviceRatio, 2);
     var w = Math.max(1, Math.floor(canvas.clientWidth * dpr));
     var h = Math.max(1, Math.floor(canvas.clientHeight * dpr));
     if (w !== canvas.width || h !== canvas.height) {
       canvas.width = w; canvas.height = h;
     }
     width = w; height = h;
-    var hw = Math.max(1, Math.floor(hudCanvas.clientWidth * dpr));
-    var hh = Math.max(1, Math.floor(hudCanvas.clientHeight * dpr));
+    var hw = Math.max(1, Math.floor(hudCanvas.clientWidth * hudDpr));
+    var hh = Math.max(1, Math.floor(hudCanvas.clientHeight * hudDpr));
     if (hw !== hudCanvas.width || hh !== hudCanvas.height) {
       hudCanvas.width = hw; hudCanvas.height = hh;
-      safe('HUD', 'resize', [hw, hh, dpr]);
+      safe('HUD', 'resize', [hw, hh, hudDpr]);
     }
   }
 
@@ -133,9 +152,13 @@
     RL.GL.gl = gl;
     canvas.addEventListener('webglcontextlost', function (e) {
       e.preventDefault();
-      showFatal('The graphics context was lost. Please reload the page.');
-      document.getElementById('loading').style.display = '';
+      contextLost = true;
+      if (RL.Game && RL.Game.state === 'playing' && RL.Game.setPaused) safe('Game', 'setPaused', [true]);
+      safe('Input', 'exitPointerLock');
+      showFatal('The graphics context was lost. Reloading…');
     });
+    // Every program, buffer and texture died with the context; a reload is the reliable restore.
+    canvas.addEventListener('webglcontextrestored', function () { window.location.reload(); });
     resize();
     window.addEventListener('resize', resize);
 
@@ -180,8 +203,9 @@
     setLoading('Ready', 1);
     var el = document.getElementById('loading');
     if (el) el.classList.add('done');
-    setTimeout(function () { if (el) el.style.display = 'none'; }, 600);
+    setTimeout(function () { if (el && !el.classList.contains('fatal')) el.style.display = 'none'; }, 600);
     if (RL.Params.camera) safe('CameraRig', 'setMode', [RL.Params.camera]);
+    RL.GL.getDummyShadowTexture(gl); // create it now rather than mid-frame
     resize();
     RL.ready = true;
     RL.Events.emit('ready', {});
@@ -326,12 +350,12 @@
       hidden: false
     };
 
-    // Opaque
-    safe('Sky', 'draw', [frame]); G.resetState(gl);
+    // Opaque (the sky goes last: it only shades pixels still at the cleared far depth)
     safe('Terrain', 'draw', [frame]); G.resetState(gl);
     safe('Airfield', 'draw', [frame]); G.resetState(gl);
     if (plane) { safe('Aircraft', 'draw', [frame, plane, opts]); G.resetState(gl); }
     safe('Effects', 'draw', [frame]); G.resetState(gl);
+    safe('Sky', 'draw', [frame]); G.resetState(gl);
 
     // Transparent / additive
     safe('Water', 'draw', [frame]); G.resetState(gl);
@@ -345,11 +369,13 @@
   // ------------------------------------------------------------------ loop
   function loop(now) {
     requestAnimationFrame(loop);
+    if (contextLost) return;
     var realDt = Math.min(Math.max((now - lastNow) / 1000, 0), 0.1);
     lastNow = now;
     realTime += realDt;
     fpsAccum += realDt; fpsFrames++;
     if (fpsAccum >= 0.5) { RL.fps = fpsFrames / fpsAccum; fpsAccum = 0; fpsFrames = 0; }
+    checkFrameRate(realDt);
 
     resize();
     safe('Input', 'update', [realDt]);
@@ -363,6 +389,19 @@
     render();
     safe('HUD', 'draw', [realDt]);
     safe('Audio', 'update', [realDt, getPlane(), getControls(), { state: gameState(), cameraMode: frame.cameraMode }]);
+  }
+
+  // One gentle hint per session when high quality clearly can't keep up on this machine.
+  function checkFrameRate(dt) {
+    if (lowFpsHinted || RL.Params.quality !== 'high' || realTime < 5 || !RL.fps) return;
+    if (gameState() !== 'playing') { lowFpsTime = 0; return; }
+    lowFpsTime = RL.fps < 30 ? lowFpsTime + dt : 0;
+    if (lowFpsTime > 10) {
+      lowFpsHinted = true;
+      RL.Events.emit('message', {
+        text: 'Low frame rate: try Graphics: Low in the pause menu (P)', kind: 'warn', duration: 5
+      });
+    }
   }
 
   // ------------------------------------------------------------------ test / debug hooks
