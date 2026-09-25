@@ -139,8 +139,8 @@ Test hooks (`RL.debug`): `controls` (object merged over input controls), `camera
 
 ### RL.Terrain — js/world/noise.js, js/world/terrain.js (world agent)
 * `init(gl, {resolution})`; `ready` (true after init).
-* `heightAt(x, z)` — **must interpolate exactly the rendered triangles** (same diagonal split),
-  clamped at the world edge. Inside `Config.airfield.flatZone` it returns exactly
+* `heightAt(x, z)` — **must interpolate exactly the rendered triangles** (same diagonal split)
+  everywhere: the grid inside ±half, the drawn horizon skirt beyond it. Inside `Config.airfield.flatZone` it returns exactly
   `Config.airfield.elevation`.
 * `normalAt(x, z, out)`; `draw(frame)` (ground + trees + rocks + arch).
 * `colliders` — spheres approximating the stone arch (`{type:'sphere', center, radius, name:'arch'}`).
@@ -268,7 +268,8 @@ crashed bool, crashReason string, smoke bool, time (s since reset)
 | Mouse wheel | Throttle |
 | Left mouse / Shift (hold) | Skywriting smoke |
 | Right mouse (hold) + move | Free look |
-| Middle click / X | Center the stick |
+| Middle click / X | Center the stick (and trim) |
+| [ / ] | Pitch trim nose down / up |
 | W / S | Throttle up / down |
 | A / D | Rudder (nose-wheel steering on the ground) |
 | ↑ / ↓ | Pitch down / up |

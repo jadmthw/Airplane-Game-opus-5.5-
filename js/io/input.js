@@ -128,10 +128,13 @@
     if (RL.Events) RL.Events.emit('userGesture', {});
   }
 
+  // Only fields that take typed text swallow flight keys; a focused slider or checkbox must not.
+  var TEXT_INPUTS = { text: 1, search: 1, email: 1, number: 1, password: 1, url: 1, tel: 1 };
   function isTextTarget(t) {
     if (!t || !t.tagName) return false;
     var n = t.tagName;
-    return n === 'INPUT' || n === 'TEXTAREA' || n === 'SELECT' || t.isContentEditable;
+    if (n === 'INPUT') return !!TEXT_INPUTS[(t.type || 'text').toLowerCase()];
+    return n === 'TEXTAREA' || n === 'SELECT' || !!t.isContentEditable;
   }
 
   function loadSettings() {

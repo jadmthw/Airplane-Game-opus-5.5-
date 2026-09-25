@@ -469,6 +469,7 @@
       g = Math.max(g, hdg <= 3 ? 0 : hdg <= 7 ? 1 : hdg <= 12 ? 2 : 3);
     }
     if (td.bounced) g = Math.min(3, g + 1);
+    if (td.noseFirst) g = Math.min(3, g + 1);   // nose wheel first: survivable, never pretty
     var grade = GRADE_ORDER[g];
     var pts = LANDING_POINTS[grade];
     var label = LANDING_LABEL[grade];
@@ -544,7 +545,7 @@
             verticalSpeed: vs,
             centerlineOffset: fin(ev.centerlineOffset, 0) * (p.forward && p.forward[2] > 0 ? -1 : 1),
             headingError: fin(ev.headingError, 0), onRunway: !!ev.onRunway,
-            surface: ev.surface || 'grass', bounced: false, roll: 0
+            surface: ev.surface || 'grass', bounced: false, roll: 0, noseFirst: !!ev.noseFirst
           };
           emit('touchdown', {
             verticalSpeed: vs, speed: fin(ev.speed, 0), surface: ev.surface || 'grass',
@@ -914,14 +915,15 @@
   }
   function centerlineOffset(p) { return Math.abs(p.pos[0] - C.airfield.runway.cx); }
 
-  // Rotation: a keyboard pilot who holds the pitch key over-rotates and stalls, so say "tap" and
-  // give the target attitude (the HUD ladder's 10 degree rung). Mouse wording follows the invert
-  // setting and is only offered when the mouse is really flying.
+  // Rotation: pitch keys build up gently and the flight model protects the wing near the ground,
+  // so the keyboard pilot holds the key until the nose reaches the target attitude (the HUD
+  // ladder's 10 degree rung). Mouse wording follows the invert setting and is only offered when
+  // the mouse is really flying.
   function rotateText() {
     var I = RL.Input || {};
-    if (!mouseFlying()) return 'At 60 kt tap [↓] to lift the nose to about 10°, then let go and let her climb';
+    if (!mouseFlying()) return 'At 60 kt hold [↓] until the nose is about 10° up, then let go and let her climb';
     var dir = I.settings && I.settings.invertPitch ? 'forward' : 'back';
-    return 'At 60 kt ease the mouse ' + dir + ' (or tap [↓]): nose up about 10°, then let her climb';
+    return 'At 60 kt ease the mouse ' + dir + ' (or hold [↓]): nose up about 10°, then let her climb';
   }
   function steerText() {
     return 'Keep her on the centreline: steer with [A] / [D]' + (mouseFlying() ? ' or the mouse' : '');

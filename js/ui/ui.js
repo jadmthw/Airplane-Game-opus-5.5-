@@ -453,7 +453,8 @@
       row('<kbd>Space</kbd>', 'Wheel brakes') +
       row('<kbd>F</kbd>', 'Flaps 0 → 1 → 2') +
       row('<kbd>G</kbd>', 'Landing gear') +
-      row('Middle click / <kbd>X</kbd>', 'Center the stick') +
+      row('<kbd>[</kbd> <kbd>]</kbd>', 'Pitch trim nose down / up') +
+      row('Middle click / <kbd>X</kbd>', 'Center the stick and trim') +
       row('<kbd>V</kbd>', 'Mouse flight on / off') +
       row('<kbd>I</kbd>', 'Invert mouse pitch') +
       '</div>'));
@@ -471,7 +472,8 @@
       row('<kbd>H</kbd> / <kbd>F1</kbd>', 'This help') +
       '</div>' +
       '<div class="rl-section-title">Flying tips</div><ul class="rl-tips">' +
-      '<li>Full throttle and keep straight with A / D (the mouse steers too). At about 60 kt tap ↓ to lift the nose to 10°, then gear up.</li>' +
+      '<li>Full throttle and keep straight with A / D (the mouse steers too). At about 60 kt ease back on ↓ until the nose is about 10° up, then gear up.</li>' +
+      '<li>Holding ↑ / ↓ starts gently and builds to full deflection; tap for small corrections, or trim with [ and ].</li>' +
       '<li>The clock starts at ring 1. Pass close to the centre for a bullseye.</li>' +
       '<li>To land: below 80 kt, flaps twice, gear down, flare just above the runway.</li>' +
       '<li>Chain rings and stunts within 12 s to build a combo multiplier.</li>' +

@@ -587,7 +587,9 @@
 
     // ---- stall horn
     var sw = alive && playing && !plane.onGround ? M.clamp(fin(plane.stallWarning, 0), 0, 1) : 0;
-    setP(N.hornVol.gain, sw > 0.12 ? (0.035 + 0.05 * sw) * (cockpit ? 1.2 : 0.8) : 0, 0.03);
+    // softer while the AoA protection is holding the wing (a hard pull, not a real stall)
+    var hornScale = 1 - 0.6 * M.clamp(fin(plane.stallProtect, 0), 0, 1);
+    setP(N.hornVol.gain, sw > 0.12 ? (0.035 + 0.05 * sw) * (cockpit ? 1.2 : 0.8) * hornScale : 0, 0.03);
 
     // ---- smoke hiss
     var smoking = alive && playing && !!(controls && controls.smoke);

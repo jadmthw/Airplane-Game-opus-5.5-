@@ -35,6 +35,7 @@
   var clipB = new Float32Array(4);
   var clipC = new Float32Array(4);
   var time = 0;
+  var cockpitView = false;   // set each frame in draw()
   var accelKt = 0, prevKt = -1;
   var hintW = 0, hintKey = '';
   var map = null, mapRes = 0, mapHalf = 6000, mapTries = 0;
@@ -197,16 +198,20 @@
     prevKt = kt;
 
     var mode = RL.frame.cameraMode || (RL.CameraRig && RL.CameraRig.mode) || 'chase';
-    var conformal = mode === 'chase' || mode === 'cockpit';
+    // In the cockpit the 3D panel already shows airspeed, attitude, altitude, rpm, gear and
+    // flaps, so the duplicate tapes/ladder/engine box step aside and leave the view clear.
+    cockpitView = mode === 'cockpit';
 
-    if (conformal) drawAttitude(p, mode);
+    if (mode === 'chase') drawAttitude(p, mode);
     drawNav(G, p);
-    drawSpeedTape(p, kt);
-    drawAltTape(p);
+    if (!cockpitView) {
+      drawSpeedTape(p, kt);
+      drawAltTape(p);
+    }
     drawHeadingTape(G, p);
     drawCoursePanel(G);
     drawScorePanel(G);
-    drawEnginePanel(p);
+    if (!cockpitView) drawEnginePanel(p);
     drawMinimap(G, p);
     drawPopups(G);
     drawLanding(G);
@@ -1047,7 +1052,8 @@
     var str = h.text;
     ctx.font = F.label;
     if (hintKey !== str) { hintKey = str; hintW = measureHint(str); }
-    var pw = hintW + 36 * S, ph = 34 * S, x = cx - pw / 2, y = H - 64 * S - ph / 2;
+    var pw = hintW + 36 * S, ph = 34 * S, x = cx - pw / 2;
+    var y = cockpitView ? 96 * S : H - 64 * S - ph / 2;   // above the glare shield in the cockpit
     ctx.globalAlpha = alpha * a;
     rr(x, y, pw, ph, 17 * S);
     ctx.fillStyle = 'rgba(9,15,24,0.72)'; ctx.fill();
@@ -1104,7 +1110,8 @@
     var a = 0.55 + 0.25 * Math.sin(time * 3);
     ctx.globalAlpha = alpha * a;
     shadowOn(4);
-    text('Click to capture the mouse for flight  ·  V for keyboard only', cx, cy + 250 * S, F.small, INK, 'center', 'middle');
+    text('Click to capture the mouse for flight  ·  V for keyboard only', cx,
+      cockpitView ? 150 * S : cy + 250 * S, F.small, INK, 'center', 'middle');
     shadowOff();
     ctx.globalAlpha = alpha;
   }
