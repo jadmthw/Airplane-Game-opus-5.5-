@@ -10,7 +10,9 @@
  *   3. Carving: a mesa plateau around the canyon (so it always reads as a deep gorge), the canyon
  *      itself (flat floor, terraced rock walls), the lake bowl, and the airfield flat zone.
  *
- * heightAt() interpolates exactly the rendered triangles (per-cell diagonal choice in `diag`).
+ * heightAt() interpolates exactly the rendered triangles (per-cell diagonal choice in `diag`);
+ * beyond the grid edge it interpolates the drawn horizon skirt, so physics matches what is seen.
+ * Drawing is frustum-culled per chunk (terrain index ranges and prop instances).
  */
 (function (RL) {
   'use strict';
@@ -62,10 +64,24 @@
 
   // GL resources
   var glc = null, progTerrain = null, progProps = null;
-  var terrainMesh = null, skirtMesh = null, coniferMesh = null, broadleafMesh = null;
-  var boulderMesh = null, archMesh = null;
+  var terrainMesh = null, skirtMesh = null, archMesh = null;
   var windVec = new Float32Array(2);
   var flatZoneVec = new Float32Array(4);
+
+  // Frustum culling. The playable square is split into CHUNKS x CHUNKS chunks; the terrain index
+  // buffer is laid out chunk by chunk and prop instances are sorted by chunk, so each frame only
+  // the chunks inside the view frustum are submitted. There is deliberately no distance cull or
+  // LOD: heightAt() must match the rendered triangles, and the far plane lies beyond the world.
+  var CHUNKS = 16, NCH = CHUNKS * CHUNKS;
+  var chunkBox = new Float32Array(NCH * 6);   // minX, minY, minZ, maxX, maxY, maxZ (terrain + props)
+  var chunkIdx = new Uint32Array(NCH + 1);    // first terrain index of each chunk (+ end)
+  var chunkVis = new Uint8Array(NCH);
+  var frustum = new Float64Array(24);
+  var propSets = [];                          // conifers, broadleaf, boulders (see chunkedProps)
+  var cullStats = { chunks: 0, terrainTris: 0, instances: 0 };
+
+  // Horizon skirt, kept on the CPU so heightAt() beyond the grid follows the drawn mountains.
+  var skirt = null;                           // { pos, idx, M (columns), K (rings), dth }
 
   // ------------------------------------------------------------------ polylines
   /** Catmull-Rom spline through control points, resampled every ~step meters. */
@@ -454,7 +470,57 @@
   }
 
   // ------------------------------------------------------------------ triangles / queries
+  /** True when (x, z) lies beyond the heightfield grid (where the horizon skirt is drawn). */
+  function beyondGrid(x, z) {
+    var e = half + 1e-3;
+    return x > e || x < -e || z > e || z < -e;
+  }
+
+  // skirtSample() result: height and the upward (unnormalised) plane normal of the triangle.
+  var SK = { h: 0, nx: 0, ny: 1, nz: 0 };
+
+  /**
+   * The drawn horizon skirt at (x, z) beyond the grid: finds the skirt triangle containing the
+   * point (same (a,b,d) / (a,d,c) split as the index buffer) and interpolates it, so physics and
+   * the camera meet exactly the mountains that are drawn out there. All vertices of one angular
+   * column lie on the ray at that angle, so the column is exact; the ring segments are nested
+   * (every ring lies outside the previous one), so a binary search finds the band.
+   */
+  function skirtSample(x, z) {
+    var S = skirt, M_ = S.M, P = S.pos;
+    var th = Math.atan2(z, x);
+    if (th < 0) th += Math.PI * 2;
+    var j = Math.floor(th / S.dth);
+    if (j >= M_) j = M_ - 1;
+    var j1 = (j + 1) % M_;
+    // largest ring k whose segment (column j -> j1) the point is on or outside of
+    var lo = 0, hi = S.K - 1;
+    while (lo < hi) {
+      var mid = (lo + hi + 1) >> 1;
+      var ia = (mid * M_ + j) * 3, ib = (mid * M_ + j1) * 3;
+      var ax = P[ia], az = P[ia + 2];
+      // origin side of a CCW segment is > 0, so outside means <= 0
+      if ((P[ib] - ax) * (z - az) - (P[ib + 2] - az) * (x - ax) <= 0) lo = mid; else hi = mid - 1;
+    }
+    var k = Math.min(lo, S.K - 2);          // beyond the outer ring: extend the last band's plane
+    var a = (k * M_ + j) * 3, b = (k * M_ + j1) * 3, c = ((k + 1) * M_ + j) * 3, d = ((k + 1) * M_ + j1) * 3;
+    // which side of the a-d diagonal: triangle (a, b, d) holds b's side, (a, d, c) the other
+    var dx = P[d] - P[a], dz = P[d + 2] - P[a + 2];
+    var sp = dx * (z - P[a + 2]) - dz * (x - P[a]);
+    var sb = dx * (P[b + 2] - P[a + 2]) - dz * (P[b] - P[a]);
+    var q = (sp > 0) === (sb > 0) ? b : c;
+    var e1x = P[q] - P[a], e1y = P[q + 1] - P[a + 1], e1z = P[q + 2] - P[a + 2];
+    var e2x = P[d] - P[a], e2y = P[d + 1] - P[a + 1], e2z = P[d + 2] - P[a + 2];
+    var nx = e1y * e2z - e1z * e2y, ny = e1z * e2x - e1x * e2z, nz = e1x * e2y - e1y * e2x;
+    if (ny < 0) { nx = -nx; ny = -ny; nz = -nz; }
+    if (ny < 1e-9) { SK.h = P[a + 1]; SK.nx = 0; SK.ny = 1; SK.nz = 0; return SK; }
+    SK.h = P[a + 1] - (nx * (x - P[a]) + nz * (z - P[a + 2])) / ny;
+    SK.nx = nx; SK.ny = ny; SK.nz = nz;
+    return SK;
+  }
+
   function heightAt(x, z) {
+    if (skirt && beyondGrid(x, z)) return skirtSample(x, z).h;
     var gx = (x + half) * invCell, gz = (z + half) * invCell;
     if (!(gx > 0)) gx = 0; else if (gx > res) gx = res;
     if (!(gz > 0)) gz = 0; else if (gz > res) gz = res;
@@ -476,6 +542,11 @@
   function normalAt(x, z, out) {
     out = out || RL.v3.create();
     if (!data) { out[0] = 0; out[1] = 1; out[2] = 0; return out; }
+    if (skirt && beyondGrid(x, z)) {
+      var s = skirtSample(x, z), sl = 1 / Math.sqrt(s.nx * s.nx + s.ny * s.ny + s.nz * s.nz);
+      out[0] = s.nx * sl; out[1] = s.ny * sl; out[2] = s.nz * sl;
+      return out;
+    }
     var gx = (x + half) * invCell, gz = (z + half) * invCell;
     if (!(gx > 0)) gx = 0; else if (gx > res) gx = res;
     if (!(gz > 0)) gz = 0; else if (gz > res) gz = res;
@@ -524,24 +595,78 @@
         uv[i * 2] = out[4]; uv[i * 2 + 1] = out[5];
       }
     }
+    // Indices are emitted chunk by chunk (row-major over chunks) so each chunk is one contiguous
+    // range and neighbouring visible chunks merge into one draw; chunkBox starts as each chunk's
+    // ground bounds (props widen it later).
     var idx = new Uint32Array(res * res * 6), k = 0;
-    for (iz = 0; iz < res; iz++) {
-      for (ix = 0; ix < res; ix++) {
-        var a = iz * N + ix, b = a + 1, c = a + N, d = a + N + 1;
-        if (diag[iz * res + ix] === 0) { idx[k++] = a; idx[k++] = c; idx[k++] = d; idx[k++] = a; idx[k++] = d; idx[k++] = b; }
-        else { idx[k++] = a; idx[k++] = c; idx[k++] = b; idx[k++] = b; idx[k++] = c; idx[k++] = d; }
+    for (var cz = 0; cz < CHUNKS; cz++) {
+      var z0 = Math.floor(cz * res / CHUNKS), z1 = Math.floor((cz + 1) * res / CHUNKS);
+      for (var cx = 0; cx < CHUNKS; cx++) {
+        var x0 = Math.floor(cx * res / CHUNKS), x1 = Math.floor((cx + 1) * res / CHUNKS);
+        var ch = cz * CHUNKS + cx, lo = Infinity, hi = -Infinity;
+        chunkIdx[ch] = k;
+        for (iz = z0; iz < z1; iz++) {
+          for (ix = x0; ix < x1; ix++) {
+            var a = iz * N + ix, b = a + 1, c = a + N, d = a + N + 1;
+            if (diag[iz * res + ix] === 0) { idx[k++] = a; idx[k++] = c; idx[k++] = d; idx[k++] = a; idx[k++] = d; idx[k++] = b; }
+            else { idx[k++] = a; idx[k++] = c; idx[k++] = b; idx[k++] = b; idx[k++] = c; idx[k++] = d; }
+          }
+        }
+        for (iz = z0; iz <= z1; iz++) {
+          for (ix = x0; ix <= x1; ix++) { h = data[iz * N + ix]; if (h < lo) lo = h; if (h > hi) hi = h; }
+        }
+        var bx = ch * 6;
+        chunkBox[bx] = -half + x0 * cell; chunkBox[bx + 1] = lo; chunkBox[bx + 2] = -half + z0 * cell;
+        chunkBox[bx + 3] = -half + x1 * cell; chunkBox[bx + 4] = hi; chunkBox[bx + 5] = -half + z1 * cell;
       }
     }
+    chunkIdx[NCH] = k;
     return RL.GL.createMesh(gl, { positions: pos, normals: nrm, colors: col, colorSize: 4, uvs: uv, indices: idx });
+  }
+
+  /** Chunk index of a point (clamped to the grid). */
+  function chunkOf(x, z) {
+    var cx = Math.floor((x + half) / (2 * half) * CHUNKS), cz = Math.floor((z + half) / (2 * half) * CHUNKS);
+    cx = cx < 0 ? 0 : cx >= CHUNKS ? CHUNKS - 1 : cx;
+    cz = cz < 0 ? 0 : cz >= CHUNKS ? CHUNKS - 1 : cz;
+    return cz * CHUNKS + cx;
+  }
+
+  /** Six frustum planes (a, b, c, d; inside >= 0) from a column-major view-projection matrix. */
+  function extractFrustum(m, out) {
+    for (var p = 0; p < 6; p++) {
+      var r = p >> 1, s = (p & 1) ? -1 : 1;
+      for (var c = 0; c < 4; c++) out[p * 4 + c] = m[c * 4 + 3] + s * m[c * 4 + r];
+    }
+    return out;
+  }
+
+  /** Marks the chunks whose box touches the frustum in chunkVis; returns how many do. */
+  function cullChunks(viewProj) {
+    var F = extractFrustum(viewProj, frustum), n = 0;
+    for (var ch = 0; ch < NCH; ch++) {
+      var b = ch * 6, vis = 1;
+      for (var p = 0; p < 24; p += 4) {
+        var a = F[p], bb = F[p + 1], c = F[p + 2];
+        // the box corner furthest along the plane normal
+        var d = a * (a > 0 ? chunkBox[b + 3] : chunkBox[b]) + bb * (bb > 0 ? chunkBox[b + 4] : chunkBox[b + 1]) +
+          c * (c > 0 ? chunkBox[b + 5] : chunkBox[b + 2]) + F[p + 3];
+        if (d < 0) { vis = 0; break; }
+      }
+      chunkVis[ch] = vis;
+      n += vis;
+    }
+    return n;
   }
 
   /**
    * Horizon ring of mountains from the playable square out to ~24 km: concentric rings that start
    * as the square's edge and morph into a circle, with spacing growing with distance (~80 m at the
    * edge, a few hundred meters far out) so it is detailed where it meets the terrain and cheap
-   * where the fog hides it.
+   * where the fog hides it. Built on the CPU during init (heightAt() beyond the grid reads it,
+   * with or without a GL context); buildSkirtMesh() adds normals and colours for drawing.
    */
-  function buildSkirtMesh(gl) {
+  function buildSkirt() {
     var M_ = 480, dth = Math.PI * 2 / M_;
     var radii = [half], r = half, step = 90;
     while (r < SKIRT_OUTER) {
@@ -550,8 +675,7 @@
       radii.push(r);
     }
     var K = radii.length, nv = K * M_;
-    var pos = new Float32Array(nv * 3), nrm = new Float32Array(nv * 3), col = new Float32Array(nv * 4);
-    var uv = new Float32Array(nv * 2), out = new Float64Array(6);
+    var pos = new Float32Array(nv * 3);
     var k, j, i;
     for (k = 0; k < K; k++) {
       var rk = radii[k], f = sstep(half, SKIRT_OUTER * 0.8, rk);
@@ -587,6 +711,13 @@
         idx[n++] = a; idx[n++] = b; idx[n++] = d; idx[n++] = a; idx[n++] = d; idx[n++] = c;
       }
     }
+    return { pos: pos, idx: idx, M: M_, K: K, dth: dth };
+  }
+
+  function buildSkirtMesh(gl) {
+    var pos = skirt.pos, idx = skirt.idx, nv = pos.length / 3, i;
+    var nrm = new Float32Array(nv * 3), col = new Float32Array(nv * 4);
+    var uv = new Float32Array(nv * 2), out = new Float64Array(6);
     // smooth normals from the faces, then colours
     for (var t = 0; t < idx.length; t += 3) {
       var ia = idx[t] * 3, ib = idx[t + 1] * 3, ic = idx[t + 2] * 3;
@@ -744,13 +875,76 @@
     return { con: con, nc: nc, broad: broad, nb: nb, rock: rock, nr: nr };
   }
 
-  function instancedMesh(gl, geo, inst, count) {
-    return RL.GL.meshFromGeo(gl, geo, {
+  /**
+   * Instanced props prepared for frustum culling: the instances are counting-sorted by chunk into
+   * src (chunk ch owns instances start[ch] .. start[ch + 1]), and chunkBox is widened by each
+   * instance's bounds (geometry extent x scale, plus the wind sway). drawProps() packs the visible
+   * ranges into staging and uploads them to the (dynamic) instance buffer.
+   */
+  function chunkedProps(gl, geo, inst, count) {
+    var start = new Uint32Array(NCH + 1), chOf = new Uint16Array(count), i, ch;
+    for (i = 0; i < count; i++) {
+      ch = chunkOf(inst[i * 8], inst[i * 8 + 2]);
+      chOf[i] = ch;
+      start[ch + 1]++;
+    }
+    for (ch = 0; ch < NCH; ch++) start[ch + 1] += start[ch];
+    // local extent of the model: radius around its vertical axis (any yaw) and height range
+    var P = geo.positions, rMax = 0, yMin = 0, yMax = 0;
+    for (i = 0; i < P.length; i += 3) {
+      rMax = Math.max(rMax, Math.sqrt(P[i] * P[i] + P[i + 2] * P[i + 2]));
+      yMin = Math.min(yMin, P[i + 1]); yMax = Math.max(yMax, P[i + 1]);
+    }
+    var reach = rMax + 0.15;    // sway moves tree tops by at most ~0.13 x scale (strongest wind)
+    var src = new Float32Array(Math.max(count, 1) * 8), fill = start.slice(0, NCH);
+    for (i = 0; i < count; i++) {
+      ch = chOf[i];
+      var o = i * 8, dst = fill[ch]++ * 8;
+      for (var q = 0; q < 8; q++) src[dst + q] = inst[o + q];
+      var s = inst[o + 3], hs = s * inst[o + 7], b = ch * 6, r = reach * s;
+      chunkBox[b] = Math.min(chunkBox[b], inst[o] - r);
+      chunkBox[b + 1] = Math.min(chunkBox[b + 1], inst[o + 1] + yMin * hs);
+      chunkBox[b + 2] = Math.min(chunkBox[b + 2], inst[o + 2] - r);
+      chunkBox[b + 3] = Math.max(chunkBox[b + 3], inst[o] + r);
+      chunkBox[b + 4] = Math.max(chunkBox[b + 4], inst[o + 1] + yMax * hs);
+      chunkBox[b + 5] = Math.max(chunkBox[b + 5], inst[o + 2] + r);
+    }
+    var mesh = RL.GL.meshFromGeo(gl, geo, {
       instances: {
-        data: inst.subarray(0, Math.max(count, 1) * 8), stride: 8, count: count,
+        data: src, stride: 8, count: count, usage: gl.DYNAMIC_DRAW,
         attribs: [{ loc: 4, size: 4, offset: 0 }, { loc: 5, size: 4, offset: 4 }]
       }
     });
+    return { mesh: mesh, src: src, staging: new Float32Array(src.length), start: start, shown: new Uint8Array(NCH), valid: false };
+  }
+
+  /**
+   * Draws the instances of the visible chunks (chunkVis). The instance buffer is repacked only
+   * when a chunk holding instances of this set changed visibility since the last upload.
+   */
+  function drawProps(gl, S) {
+    var st = S.start, n = 0, changed = !S.valid, ch;
+    for (ch = 0; ch < NCH; ch++) {
+      if (st[ch + 1] === st[ch]) continue;
+      if (chunkVis[ch]) n += st[ch + 1] - st[ch];
+      if (chunkVis[ch] !== S.shown[ch]) changed = true;
+    }
+    if (n > 0 && changed) {
+      var dst = 0;
+      ch = 0;
+      while (ch < NCH) {
+        if (!chunkVis[ch]) { ch++; continue; }
+        var from = st[ch];
+        while (ch < NCH && chunkVis[ch]) ch++;
+        var to = st[ch];
+        if (to > from) { S.staging.set(S.src.subarray(from * 8, to * 8), dst * 8); dst += to - from; }
+      }
+      RL.GL.updateInstances(gl, S.mesh, S.staging, n);
+      S.shown.set(chunkVis);
+      S.valid = true;
+    }
+    RL.GL.drawMesh(gl, S.mesh, n);
+    return n;
   }
 
   // ------------------------------------------------------------------ the stone arch
@@ -886,10 +1080,11 @@
     '  vec3 alb = toLinear(v_col.rgb);',
     '  // multi-scale detail so the ground reads up close and from altitude',
     '  float n1 = vnoise(v_pos.xz * 0.018);',
-    '  float n2 = vnoise(v_pos.xz * 0.11 + 7.0);',
-    '  float n3 = vnoise(v_pos.xz * 0.55 + 3.0);',
     '  float fine = 1.0 - smoothstep(150.0, 900.0, dist);',
-    '  alb *= 1.0 + (n1 - 0.5) * 0.28 + ((n2 - 0.5) * 0.22 + (n3 - 0.5) * 0.16) * fine;',
+    '  float det = 0.0;',
+    '  // the fine octaves only exist near the camera: skip their noise where they are faded out',
+    '  if (fine > 0.0) det = (vnoise(v_pos.xz * 0.11 + 7.0) - 0.5) * 0.22 + (vnoise(v_pos.xz * 0.55 + 3.0) - 0.5) * 0.16;',
+    '  alb *= 1.0 + (n1 - 0.5) * 0.28 + det * fine;',
     '  // mown stripes on the airfield grass',
     '  vec2 inz = step(u_flatZone.xy, v_pos.xz) * step(v_pos.xz, u_flatZone.zw);',
     '  float stripe = step(0.5, fract(v_pos.x / 18.0));',
@@ -970,6 +1165,9 @@
     '  alb = mix(alb, vec3(dot(alb, vec3(0.3, 0.55, 0.15))) * vec3(0.85, 0.95, 1.15), u_nightFactor * 0.45);',
     '  float sh = shadowFactor(v_pos, N);',
     '  vec3 c = shadeLit(alb, N, v_pos, sh, 0.04, 16.0);',
+    '  // rock (arch, boulders): warm light bounced up from the sunlit ground onto down-facing faces,',
+    '  // so the arch underside reads as lit sandstone rather than a black cut-out',
+    '  c += alb * u_sunColor * max(u_sunDir.y, 0.0) * 0.12 * u_rockDetail * clamp(-N.y, 0.0, 1.0) * vec3(1.0, 0.85, 0.7);',
     '  // foliage lets a little light through on the shaded side',
     '  c += alb * u_sunColor * 0.10 * (1.0 - u_rockDetail) * clamp(0.5 - 0.5 * dot(N, u_sunDir), 0.0, 1.0);',
     '  c = applyFog(c, v_pos);',
@@ -1024,9 +1222,9 @@
     skirtMesh = buildSkirtMesh(gl);
     var tSkirt = performance.now();
     var props = placeProps(low);
-    coniferMesh = instancedMesh(gl, coniferGeo(), props.con, props.nc);
-    broadleafMesh = instancedMesh(gl, broadleafGeo(), props.broad, props.nb);
-    boulderMesh = instancedMesh(gl, boulderGeo(), props.rock, props.nr);
+    propSets = [chunkedProps(gl, coniferGeo(), props.con, props.nc),
+      chunkedProps(gl, broadleafGeo(), props.broad, props.nb),
+      chunkedProps(gl, boulderGeo(), props.rock, props.nr)];
     Terrain.counts = { conifers: props.nc, broadleaf: props.nb, boulders: props.nr };
     var tProps = performance.now();
     if (archGeo) {
@@ -1099,6 +1297,8 @@
         }
       }
       heightData = { data: data, res: res, half: half };
+      skirt = null;                     // re-init: buildSkirt() must sample the new grid's edge
+      skirt = buildSkirt();
       Terrain.heightAt = heightAt;      // fast path once the data exists
       var tHeights = performance.now();
 
@@ -1137,7 +1337,18 @@
       G.applyFrame(gl, progTerrain, frame);
       var u = progTerrain.uniforms.u_flatZone;
       if (u) gl.uniform4fv(u.loc, flatZoneVec);
-      G.drawMesh(gl, terrainMesh);
+      var nVis = cullChunks(frame.viewProj), tris = 0;
+      // visible chunks, merging neighbours that are contiguous in the index buffer
+      var bytes = terrainMesh.indexType === gl.UNSIGNED_INT ? 4 : 2;
+      gl.bindVertexArray(terrainMesh.vao);
+      for (var ch = 0; ch < NCH;) {
+        if (!chunkVis[ch]) { ch++; continue; }
+        var first = chunkIdx[ch];
+        while (ch < NCH && chunkVis[ch]) ch++;
+        gl.drawElements(gl.TRIANGLES, chunkIdx[ch] - first, terrainMesh.indexType, first * bytes);
+        tris += (chunkIdx[ch] - first) / 3;
+      }
+      gl.bindVertexArray(null);
       G.drawMesh(gl, skirtMesh);
 
       G.use(gl, progProps);
@@ -1146,13 +1357,13 @@
       setU(gl, progProps, 'u_sway', 1);
       setU(gl, progProps, 'u_baseAO', 1);
       setU(gl, progProps, 'u_rockDetail', 0);
-      G.drawMesh(gl, coniferMesh);
-      G.drawMesh(gl, broadleafMesh);
+      var inst = drawProps(gl, propSets[0]) + drawProps(gl, propSets[1]);
       setU(gl, progProps, 'u_sway', 0);
       setU(gl, progProps, 'u_baseAO', 0);
       setU(gl, progProps, 'u_rockDetail', 1);
-      G.drawMesh(gl, boulderMesh);
+      inst += drawProps(gl, propSets[2]);
       if (archMesh) G.drawMesh(gl, archMesh);
+      cullStats.chunks = nVis; cullStats.terrainTris = tris; cullStats.instances = inst;
     },
 
     /** Internal helpers exposed for tests / debugging (not part of the contract). */
@@ -1160,6 +1371,7 @@
       canyonAt: function (x, z) { var l = sampleLayout(x, z); return { dist: l.CD, t: l.CT, floor: canyonFloor(l.CT) }; },
       openAt: function (x, z) { var l = sampleLayout(x, z); return { D: l.D, floor: l.F }; },
       mesh: function () { return terrainMesh; },
+      cull: function () { return cullStats; },   // last frame: visible chunks, terrain tris, props
       canyonPoint: function (t) { return pathPoint(canyonPl, t * canyonPl.total, [0, 0]); },
       canyonLength: function () { return canyonPl ? canyonPl.total : 0; }
     }

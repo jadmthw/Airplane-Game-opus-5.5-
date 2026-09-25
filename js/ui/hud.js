@@ -33,6 +33,7 @@
   var DASH = [1, 1], NODASH = [];
   var clip = new Float32Array(4);               // projection scratch: sx, sy, w, depth
   var clipB = new Float32Array(4);
+  var clipC = new Float32Array(4);
   var time = 0;
   var accelKt = 0, prevKt = -1;
   var hintW = 0, hintKey = '';
@@ -136,9 +137,9 @@
   function pad2(n) { return n < 10 ? '0' + n : '' + n; }
   function fmtTime(t) {
     if (!(t >= 0)) return '-:--.-';
-    var m = Math.floor(t / 60), s = t - m * 60;
-    var ss = s.toFixed(1);
-    return m + ':' + (s < 9.95 ? '0' + ss : ss);
+    // round once to tenths before splitting: 59.97 s -> '1:00.0', never '0:60.0'
+    var d = Math.round(t * 10), m = Math.floor(d / 600), s = (d - m * 600) / 10;
+    return m + ':' + (s < 10 ? '0' : '') + s.toFixed(1);
   }
   function fmtInt(n) {
     n = Math.round(n);
@@ -227,6 +228,10 @@
     ctx.beginPath();
     ctx.rect(x0, y0, x1 - x0, y1 - y0);
     ctx.clip();
+    // Chase view: keep the ladder off the aircraft itself (the -10 rung otherwise runs straight
+    // through the wings). Cut an ellipse around the projected airframe, aligned with its wings.
+    ctx.save();
+    if (mode === 'chase') clipAircraftHole(p, x0, y0, x1, y1);
     shadowOn(3);
     ctx.lineWidth = 1.6 * S;
     ctx.strokeStyle = INK;
@@ -276,6 +281,7 @@
       }
     }
     ctx.globalAlpha = alpha;
+    ctx.restore();                                  // drop the aircraft hole (markers go on top)
 
     // boresight: where the nose points
     var f = p.forward;
@@ -310,6 +316,21 @@
     shadowOff();
   }
 
+  /** Add an even-odd clip that excludes an ellipse around the aircraft's screen footprint. */
+  function clipAircraftHole(p, x0, y0, x1, y1) {
+    var P = p.pos, r = p.right, half = 5.2;         // a little more than the 4.5 m half-span
+    if (!project(P[0], P[1], P[2], clip)) return;
+    var ax = clip[0], ay = clip[1];
+    if (!project(P[0] + r[0] * half, P[1] + r[1] * half, P[2] + r[2] * half, clipB)) return;
+    var wx = clipB[0] - ax, wy = clipB[1] - ay;
+    var rx = M.clamp(Math.hypot(wx, wy) + 14 * S, 40 * S, 300 * S);
+    var ry = Math.max(rx * 0.38, 26 * S);
+    ctx.beginPath();
+    ctx.rect(x0, y0, x1 - x0, y1 - y0);
+    ctx.ellipse(ax, ay, rx, ry, Math.atan2(wy, wx), 0, Math.PI * 2);
+    ctx.clip('evenodd');
+  }
+
   // ------------------------------------------------------------------ ring navigation
   function navTarget(G) {
     var R = RL.Rings;
@@ -319,6 +340,17 @@
     }
     return null;
   }
+
+  /** Does the boresight or flight path marker (as drawAttitude places them) touch this box? */
+  function markerNear(p, l, t, r, b) {
+    var mode = RL.frame.cameraMode || (RL.CameraRig && RL.CameraRig.mode) || 'chase';
+    if (mode !== 'chase' && mode !== 'cockpit') return false;
+    var f = p.forward, v = p.vel, sp = Math.hypot(v[0], v[1], v[2]);
+    if (projectDir(f[0], f[1], f[2], clipC) && boxHit(clipC[0], clipC[1], 21 * S, 7 * S, l, t, r, b)) return true;
+    return sp > 6 && !p.onGround && projectDir(v[0] / sp, v[1] / sp, v[2] / sp, clipC) &&
+      boxHit(clipC[0], clipC[1], 18 * S, 14 * S, l, t, r, b);
+  }
+  function boxHit(x, y, hw, hh, l, t, r, b) { return x + hw > l && x - hw < r && y + hh > t && y - hh < b; }
 
   function drawNav(G, p) {
     var R = RL.Rings, ring = navTarget(G);
@@ -352,7 +384,17 @@
       ctx.moveTo(bx + pr, by + pr - c); ctx.lineTo(bx + pr, by + pr); ctx.lineTo(bx + pr - c, by + pr);
       ctx.moveTo(bx - pr + c, by + pr); ctx.lineTo(bx - pr, by + pr); ctx.lineTo(bx - pr, by + pr - c);
       ctx.stroke();
-      text(label, bx, by - pr - 6 * S, F.small, col, 'center', 'bottom');
+      // The label normally sits above the bracket, which is exactly where the flight path marker
+      // and boresight land when on course in chase view: move it beside the bracket then.
+      ctx.font = F.small;
+      var lw = ctx.measureText(label).width, lTop = by - pr - 6 * S - 13 * S, lBot = by - pr - 4 * S;
+      if (markerNear(p, bx - lw / 2 - 4 * S, lTop, bx + lw / 2 + 4 * S, lBot)) {
+        var rightX = bx + pr + 8 * S;
+        if (rightX + lw < W - 8 * S) text(label, rightX, by - pr, F.small, col, 'left', 'top');
+        else text(label, bx - pr - 8 * S, by - pr, F.small, col, 'right', 'top');
+      } else {
+        text(label, bx, by - pr - 6 * S, F.small, col, 'center', 'bottom');
+      }
       text(fmtDist(dist), bx, by + pr + 5 * S, F.mono, INK, 'center', 'top');
     } else {
       // off-screen: arrow on an ellipse around the centre, pointing at the target
@@ -487,10 +529,15 @@
     text('FT', x + w / 2, y - 6 * S, F.small, INK_DIM, 'center', 'bottom');
 
     // radar altitude near the ground
-    var aglFt = fin(p.agl, 0) * FT;
+    // radar altitude near the ground, measured from the wheels (plane.agl is the CG height, which
+    // reads ~5 ft sitting on the runway), in 1 ft steps below 50 ft to help time the flare
+    var FMp = RL.FlightModel && RL.FlightModel.params;
+    var wheelOff = FMp ? (fin(FMp.gearHeight, 0) - fin(FMp.staticSag, 0)) * M.clamp(fin(p.gear, 1), 0, 1) : 0;
+    var aglFt = Math.max(0, fin(p.agl, 0) - wheelOff) * FT;
+    if (p.onGround) aglFt = 0;
     if (aglFt < 2500 && !p.crashed) {
       var low = aglFt < 100 && !p.gearDown && !p.onGround;
-      text('RA ' + Math.max(0, Math.round(aglFt / 5) * 5), x + w / 2, y + h + 6 * S, F.monoMed, low ? CAUTION : ACCENT, 'center', 'top');
+      text('RA ' + (aglFt < 50 ? Math.round(aglFt) : Math.round(aglFt / 5) * 5), x + w / 2, y + h + 6 * S, F.monoMed, low ? CAUTION : ACCENT, 'center', 'top');
     }
 
     // vertical speed indicator (non-linear: finer near zero)
@@ -916,7 +963,7 @@
   function drawPopups(G) {
     var list = G.popups;
     if (!list) return;
-    var baseY = cy - 120 * S;
+    var baseY = cy - 165 * S;                       // above the 10 deg rung in level chase flight
     shadowOn(4);
     for (var i = 0; i < list.length; i++) {
       var q = list[i];
@@ -1057,7 +1104,7 @@
     var a = 0.55 + 0.25 * Math.sin(time * 3);
     ctx.globalAlpha = alpha * a;
     shadowOn(4);
-    text('Click to capture the mouse for flight  ·  V for keyboard only', cx, cy + 215 * S, F.small, INK, 'center', 'middle');
+    text('Click to capture the mouse for flight  ·  V for keyboard only', cx, cy + 250 * S, F.small, INK, 'center', 'middle');
     shadowOff();
     ctx.globalAlpha = alpha;
   }

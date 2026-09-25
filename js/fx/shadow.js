@@ -87,6 +87,9 @@
       size = size || 2048;
       var SL = RL.ShaderLib;
       prog = RL.GL.createProgram(gl, SL.vertex(VS), SL.fragment(FS), 'shadow-depth');
+      // Create the 1x1 "fully lit" fallback now (it is cached), not lazily mid-frame the first
+      // time a frame has no shadow (sun low, aircraft far from the camera, or no target below).
+      if (RL.GL.getDummyShadowTexture) RL.GL.getDummyShadowTexture(gl);
       target = RL.GL.createShadowTarget(gl, size);
       if (!target) return;
       Shadow.size = size;

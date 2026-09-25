@@ -17,6 +17,7 @@
   var last = { state: '', crashReady: null, results: null, resultsShown: false, help: false, paused: false };
   var pausedByHelp = false;
   var toasts = [];
+  var optionsSig = '';           // settings last shown in the option widgets (see settingsSig)
 
   var UI = {
     helpOpen: false,
@@ -49,6 +50,12 @@
   }
   function fmtInt(n) { return Math.round(n || 0).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
 
+  /** Drop keyboard focus from any widget, so flight keys reach RL.Input again. */
+  function releaseFocus() {
+    var a = document.activeElement;
+    if (a && a !== document.body && a.blur) a.blur();
+  }
+
   /** A button that runs fn on click and never keeps focus. */
   function button(label, cls, fn) {
     var b = h('button', 'rl-btn ' + (cls || ''), label);
@@ -58,6 +65,7 @@
       e.preventDefault();
       e.stopPropagation();
       b.blur();
+      releaseFocus();                              // e.g. a slider focused before this click
       try { fn(e); } catch (err) { if (window.console) console.error('[RL.UI]', err); }
     });
     return b;
@@ -98,6 +106,9 @@
       E.on('flaps', function (d) { toast(d.label || ('Flaps ' + d.notch), 'info', 1.2); });
       E.on('courseStart', function () { toast('Clock running: go go go!', 'good', 1.8); });
       E.on('timeOfDay', function () { refreshOptions(); });
+      // main.js emits 'ready' after every init (Game.init loads the saved records), so the title
+      // never keeps the placeholders from a UI frame that ran before the records were loaded
+      E.on('ready', function () { refreshRecords(); refreshOptions(); });
       E.on('crash', function () {
         el.vignette.classList.remove('flash');
         void el.vignette.offsetWidth;                     // restart the flash animation
@@ -150,11 +161,11 @@
       row('<kbd>A</kbd><kbd>D</kbd>', 'Rudder &amp; steering') +
       row('<kbd>F</kbd><kbd>G</kbd>', 'Flaps, gear') +
       row('<kbd>Space</kbd>', 'Brakes') +
-      row('Left mouse', 'Skywriting smoke') +
+      row('Left mouse / <kbd>Shift</kbd>', 'Skywriting smoke') +
       row('<kbd>C</kbd><kbd>N</kbd>', 'Camera, time of day')));
     keys.appendChild(button('All controls &amp; stunt book <kbd>H</kbd>', 'rl-btn-ghost rl-btn-small', function () { toggleHelp(); }));
     t.appendChild(keys);
-    t.appendChild(h('div', 'rl-title-foot', 'Press <kbd>Enter</kbd> or click anywhere to fly'));
+    t.appendChild(h('div', 'rl-title-foot', 'Press <kbd>Enter</kbd> or click anywhere to fly &nbsp;·&nbsp; <kbd>H</kbd> controls'));
     root.appendChild(t);
     el.title = t;
   }
@@ -214,7 +225,9 @@
     });
 
     // sensitivity slider
-    var sens = h('label', 'rl-opt rl-opt-range');
+    // A <div>, not a <label>: clicking a label focuses its range input, and a focused input
+    // swallows every flight key in RL.Input.
+    var sens = h('div', 'rl-opt rl-opt-range');
     sens.appendChild(h('div', 'rl-opt-l', 'Mouse sensitivity'));
     var range = h('input', 'rl-range');
     range.type = 'range'; range.min = '0.3'; range.max = '2.5'; range.step = '0.05';
@@ -234,9 +247,36 @@
     wrap.appendChild(sens);
     set.range = range; set.rangeVal = val;
 
+    // graphics quality: terrain resolution, trees and the shadow map are built at load time,
+    // so switching stores the choice (main.js reads 'ridgeline.quality') and reloads
+    var gfx = h('div', 'rl-opt');
+    gfx.appendChild(h('div', 'rl-opt-l', 'Graphics <span class="rl-opt-note">reloads</span>'));
+    var gchips = h('div', 'rl-chips');
+    set.gfx = {};
+    [['high', 'High'], ['low', 'Low']].forEach(function (q) {
+      var c = button(q[1], 'rl-chip', function () { setQuality(q[0]); });
+      set.gfx[q[0]] = c;
+      gchips.appendChild(c);
+    });
+    gfx.appendChild(gchips);
+    wrap.appendChild(gfx);
+
     optionSets.push(set);
     refreshOptions();
     return wrap;
+  }
+
+  function currentQuality() { return RL.Params && RL.Params.quality === 'low' ? 'low' : 'high'; }
+
+  function setQuality(q) {
+    if (q === currentQuality()) return;
+    try { window.localStorage.setItem('ridgeline.quality', q); } catch (e) { /* blocked storage */ }
+    try {
+      // an explicit ?quality= in the URL would win over the stored choice, so rewrite it
+      var search = window.location.search, re = /([?&])quality=[^&]*/;
+      if (re.test(search)) window.location.search = search.replace(re, '$1quality=' + q);
+      else window.location.reload();
+    } catch (e) { window.location.reload(); }
   }
 
   function toggleRow(parent, label, fn) {
@@ -262,6 +302,7 @@
     for (var i = 0; i < optionSets.length; i++) {
       var s = optionSets[i];
       for (var k in s.tod) s.tod[k].classList.toggle('on', !!At && At.name === k);
+      for (var g in s.gfx) s.gfx[g].classList.toggle('on', currentQuality() === g);
       s.invert.checked = !!(I && I.settings && I.settings.invertPitch);
       s.mouse.checked = !I || I.mouseFlight !== false;
       s.sound.checked = !(A && A.muted);
@@ -271,6 +312,15 @@
       if (document.activeElement !== s.range) s.range.value = String(v);
       s.rangeVal.textContent = v.toFixed(2) + '×';
     }
+    optionsSig = settingsSig();
+  }
+
+  // I / V / M change settings from the keyboard without telling the UI; compare a cheap
+  // signature each frame while a menu with options is up and refresh when it moved.
+  function settingsSig() {
+    var I = RL.Input, A = RL.Audio, At = RL.Atmosphere;
+    return (I && I.settings ? (I.settings.invertPitch ? 1 : 0) + '|' + I.settings.sensitivity : '') + '|' +
+      (I && I.mouseFlight !== false ? 1 : 0) + '|' + (A && A.muted ? 1 : 0) + '|' + (At ? At.name : '');
   }
 
   // ---- pause ----------------------------------------------------------------------------
@@ -410,7 +460,7 @@
     cols.appendChild(h('div', 'rl-help-col',
       '<div class="rl-section-title">View &amp; game</div><div class="rl-keys">' +
       row('Right mouse + move', 'Look around') +
-      row('Left mouse (hold)', 'Skywriting smoke') +
+      row('Left mouse / <kbd>Shift</kbd>', 'Skywriting smoke (hold)') +
       row('<kbd>T</kbd>', 'Smoke colour') +
       row('<kbd>C</kbd>', 'Camera: chase, cockpit, orbit, tower, flyby') +
       row('<kbd>N</kbd>', 'Time of day') +
@@ -421,7 +471,7 @@
       row('<kbd>H</kbd> / <kbd>F1</kbd>', 'This help') +
       '</div>' +
       '<div class="rl-section-title">Flying tips</div><ul class="rl-tips">' +
-      '<li>Full throttle, rotate gently at about 60 kt, then gear up.</li>' +
+      '<li>Full throttle and keep straight with A / D (the mouse steers too). At about 60 kt tap ↓ to lift the nose to 10°, then gear up.</li>' +
       '<li>The clock starts at ring 1. Pass close to the centre for a bullseye.</li>' +
       '<li>To land: below 80 kt, flaps twice, gear down, flare just above the runway.</li>' +
       '<li>Chain rings and stunts within 12 s to build a combo multiplier.</li>' +
@@ -514,6 +564,7 @@
       root.setAttribute('data-state', state);
       last.state = state;
     }
+    if ((state === 'paused' || state === 'title') && !help && settingsSig() !== optionsSig) refreshOptions();
     if (res && res !== last.results) { fillResults(res); last.results = res; }
     var showResults = !!res && !help && (state === 'playing' || state === 'paused');
     var crashReady = state === 'crashed' && !!(G && G.crash && G.crash.ready);

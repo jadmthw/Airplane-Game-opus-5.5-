@@ -17,6 +17,9 @@
  * return toward level, fading out near the stall and with flaps); ailerons command a roll rate
  * proportional to airspeed; rudder vs. a strong weathervane. Damping acts relative to the
  * rotation of the flight path, so steady turns and loops aren't resisted and banks persist.
+ * Near the ground (fading out 30-120 m AGL) a held pull can't stall the wing or, while slow,
+ * pitch past a steady climb, so rotating with a held key gives a climb (plane.stallProtect is
+ * the level of the soft AoA limiter, for the stall warnings).
  *
  * Body axes: nose = -Z, right wing = +X, up = +Y. angVel = [pitch up, yaw LEFT, roll LEFT] rad/s.
  * Controls: pitch + = nose up, roll + = roll right, yaw + = nose right.
@@ -46,13 +49,14 @@
     idleRpm: 0.2, propDisk: 2.54, propWash: 0.7,
     // rotational "feel" constants (angular accelerations at the reference dynamic pressure)
     vRef: 55,
-    kElev: 4.2, kAlpha: 16.0, alphaTrim: 1.5 * DEG, dampPitch0: 0.5, dampPitch: 3.0, pathReturn: 2.5, holdFlaps: 0.85,
+    kElev: 4.2, kAlpha: 16.0, alphaTrim: 1.5 * DEG, dampPitch0: 0.5, dampPitch: 3.0, pathReturn: 2.5, holdFlaps: 0.5,
     stallPitch: 2.6,
+    protectAgl: [30, 120],               // m AGL: takeoff / low-level stall protection fades out
     kAil: 15.3, dampRoll0: 0.4, dampRoll: 5.5, kDihedral: 4.0,
     kRud: 2.2, kBeta: 7.0, dampYaw0: 0.5, dampYaw: 2.5,
     // gear (body space, model origin = CG). Wheel points are the tyre bottoms, strut extended.
     gearHeight: 1.45, noseZ: -2.30, mainZ: 0.28, mainX: 1.3, staticSag: 0.08, stroke: 0.30,
-    muRoll: 0.035, muRollSpeed: 0.0058, muStatic: 0.045, muBrake: 0.45, muLat: 0.55,
+    muRoll: 0.035, muRollSpeed: 0.0035, muStatic: 0.045, muBrake: 0.45, muLat: 0.55,
     gearTime: 3.2, flapRate: 0.45
   };
   P.weight = P.mass * G;
@@ -78,7 +82,7 @@
     { name: 'bellyR', p: [0, -0.28, 1.9], reason: 'belly' },
     { name: 'tail', p: [0, 0.02, 3.95], reason: 'tail' },
     { name: 'fin', p: [0, 1.4, 3.95], reason: 'terrain' },
-    { name: 'canopy', p: [0, 0.96, -0.1], reason: 'terrain' },
+    { name: 'canopy', p: [0, 1.0, 0.7], reason: 'terrain' },
     { name: 'stabL', p: [-1.55, 0.15, 3.75], reason: 'wingStrike' },
     { name: 'stabR', p: [1.55, 0.15, 3.75], reason: 'wingStrike' }
   ];
@@ -86,7 +90,8 @@
   var COLLIDER_POINTS = [0, 2, 3, 4, 7, 8, 9];
 
   var HARD_LANDING = 4.5;                // m/s touchdown sink rate that breaks the gear
-  var NOSE_FIRST = 2.2;                  // m/s sink on the nose wheel alone -> nose strike
+  var NOSE_FIRST = 3.0;                  // m/s sink on the nose wheel alone -> nose strike (the
+                                         // main-gear 'firm/hard' boundary: flat arrivals aren't crashes)
   var WING_STRIKE_ROLL = 25;             // deg
   var MAX_SUBSTEP = 1 / 110;
   var BOUNDS_MARGIN = 4000;               // m past the terrain edge (the Game handles the soft edge)
@@ -166,7 +171,7 @@
       throttle: 0, rpm: P.idleRpm, flaps: 0, flapsNotch: 0, gearDown: true, gear: 1, brake: 0,
       onGround: true, wheelsOnGround: 3,
       airspeed: 0, groundSpeed: 0, verticalSpeed: 0, altitude: 0, agl: 0,
-      aoa: 0, slip: 0, gForce: 1, stall: false, stallWarning: 0,
+      aoa: 0, slip: 0, gForce: 1, stall: false, stallWarning: 0, stallProtect: 0,
       heading: 0, pitch: 0, roll: 0,
       surfaces: { aileron: 0, elevator: 0, rudder: 0 },
       crashed: false, crashReason: '', smoke: false, time: 0,
@@ -196,7 +201,7 @@
     p.crashed = false; p.crashReason = '';
     v3.set(p.angVel, 0, 0, 0);
     p.surfaces.aileron = 0; p.surfaces.elevator = 0; p.surfaces.rudder = 0;
-    p.stall = false; p.stallWarning = 0; p.brake = 0; p.smoke = false; p.time = 0;
+    p.stall = false; p.stallWarning = 0; p.stallProtect = 0; p.brake = 0; p.smoke = false; p.time = 0;
     p.flapsNotch = 0; p.flaps = 0; p.steer = 0; p.overspeed = 0;
     p._bounced = false; p._sinceTouchdown = 99; p._colT = -1;
     var onGround = spawn.onGround !== false && spawn.y === undefined;
@@ -410,12 +415,22 @@
     var aNeutral = P.alphaTrim, hold = 0;
     if (airborne && V > 5) {
       var vsNow = M.lerp(specs.vStall, specs.vStallFlaps, p.flaps);
-      hold = M.smoothstep(1.12 * vsNow, 1.45 * vsNow, V) * (1 - P.holdFlaps * p.flaps);
+      // With flaps the fade band moves closer to the (lower) flapped stall speed and the hold stays
+      // partly on, so a flapped approach keeps a damped flight path instead of a long, lightly
+      // damped phugoid (the flap-drop balloon and a sink rate that swings +5..-9 m/s).
+      hold = M.smoothstep(M.lerp(1.12, 1.08, p.flaps) * vsNow, M.lerp(1.45, 1.30, p.flaps) * vsNow, V) *
+        (1 - P.holdFlaps * p.flaps);
       if (hold > 0) {
         var sg = M.clamp(air[1] / V, -1, 1), cg = Math.sqrt(1 - sg * sg);
         var cphi = M.clamp(p.up[1] / Math.max(0.2, Math.sqrt(Math.max(0, 1 - p.forward[1] * p.forward[1]))), -1, 1);
-        var nHold = cg * cphi / Math.max(cphi * cphi, 0.25) -
-          Math.max(0, cphi) * V * sg * cg / (P.pathReturn * G);
+        // Bank compensation (1/cos bank): stick centred it reaches ~3 g (70 deg) so steep turns
+        // hold altitude; with the stick pulled it stays at the old 2 g cap so full-back pulls
+        // don't gain AoA on top of it and stall. The return-to-level term is signed with the
+        // bank (inverted it pulls the nose up through the top) and kept alive near vertical, so
+        // a hands-off dive, upright or inverted, flattens out instead of running past VNE.
+        var bankFloor = M.lerp(0.111, 0.25, Math.min(1, Math.abs(el) * 2));
+        var nHold = cg * cphi / Math.max(cphi * cphi, bankFloor) -
+          cphi * V * sg * Math.max(cg, 0.5) / (P.pathReturn * G);
         var aHold = (nHold * P.weight / Math.max(qS, 1) - P.cl0 - P.clFlaps * p.flaps) / P.clAlpha;
         aHold = M.clamp(aHold, P.alphaStallNeg + 3 * DEG, aS - 2.5 * DEG);
         aNeutral += hold * (aHold - P.alphaTrim);
@@ -424,21 +439,43 @@
     // Full stick at speed stops just short of the critical AoA; slow (hold faded) it reaches past
     // it, so the aeroplane can still be stalled deliberately.
     var elevGain = airborne ? 1 + 0.4 * (1 - hold) : 1;
-    angAcc[0] = qnT * P.kElev * elevGain * el + qn * P.kAlpha * (aNeutral - sa) -
+    // Takeoff / low-level protection, full on the ground and fading out over P.protectAgl.
+    // (1) At rotation speed the prop wash roughly doubles elevator power; capped so the stick
+    // that lifts the nose wheel isn't also the stick that over-rotates into a stall. The cap only
+    // bites when slow under power, and not at height: the slow, full-power top of a loop needs
+    // the blown elevator.
+    // A held pull also stops adding nose-up near the critical AoA (the limiter below alone can't
+    // out-pull a full, blown elevator at liftoff speed) and, while slow, past a climb attitude of
+    // ~20 deg, so holding the stick back after rotation settles into a steady full-power climb
+    // instead of pulling up into a low-level loop that runs out of speed. (With speed in hand -
+    // hold - steep pull-ups near the ground, e.g. out of the canyon, are not limited.)
+    var lowF = airborne ? 1 - M.smoothstep(P.protectAgl[0], P.protectAgl[1], p.agl) : 1;
+    var qnE = M.lerp(qnT, Math.min(qnT, qn * 1.4 + 0.05), lowF);
+    var elE = el > 0 ? el * (1 - lowF * Math.max(M.smoothstep(aS - 3.5 * DEG, aS - 0.5 * DEG, alpha),
+      M.smoothstep(0.3, 0.42, p.forward[1]) * (1 - hold))) : el;
+    angAcc[0] = qnE * P.kElev * elevGain * elE + qn * P.kAlpha * (aNeutral - sa) -
       (P.dampPitch0 + P.dampPitch * sq + (airborne ? 0 : 2.5)) * (w[0] - pathPitch) -
       qn * P.stallPitch * stallAmt * stallSign;
-    // Soft AoA limiter while the augmentation is active (i.e. with speed in hand): hard pulls
-    // ride the buffet instead of departing. Slow, the hold has faded and a stall is possible.
-    if (hold > 0) {
+    // (2) Soft AoA limiter while the augmentation is active (i.e. with speed in hand): hard pulls
+    // ride the buffet instead of departing. Slow, the hold has faded and a stall is possible -
+    // except near the ground (lowF), where holding the stick back must give a climb, not a
+    // stall onto the runway. Scaled with the prop-blown dynamic pressure so it matches the
+    // elevator it is working against. Exposed as plane.stallProtect for the warnings.
+    var lim = Math.max(hold, lowF);
+    p.stallProtect = lim;
+    if (lim > 0) {
       var aHi = aS - 1.5 * DEG, aLo = P.alphaStallNeg + 1.5 * DEG;
-      if (alpha > aHi) angAcc[0] -= hold * qn * P.kAlpha * 3 * (alpha - aHi);
-      else if (alpha < aLo) angAcc[0] -= hold * qn * P.kAlpha * 3 * (alpha - aLo);
+      if (alpha > aHi) angAcc[0] -= lim * qnT * P.kAlpha * 3 * (alpha - aHi);
+      else if (alpha < aLo) angAcc[0] -= lim * qnT * P.kAlpha * 3 * (alpha - aLo);
     }
     // in a stall the wing drops toward the slip side (gently, this is a forgiving aeroplane)
     var drop = airborne ? stallAmt * qn * (5 * sb + 0.5 * Math.sin(p.time * 1.7)) : 0;
     angAcc[2] = -qnA * P.kAil * ai * (1 - 0.5 * stallAmt) - (P.dampRoll0 + P.dampRoll * sq) * (w[2] - turnRoll) +
       P.kDihedral * qn * sb + drop;
-    angAcc[1] = -qnT * P.kRud * ru - qn * P.kBeta * sb - (P.dampYaw0 + P.dampYaw * sq) * (w[1] - pathYaw);
+    // (weathervaning is mostly resisted by the tyres on the ground: a light crosswind shouldn't
+    // turn the aeroplane off the runway during a hands-off takeoff roll)
+    angAcc[1] = -qnT * P.kRud * ru - qn * P.kBeta * sb * (airborne ? 1 : 0.35) -
+      (P.dampYaw0 + P.dampYaw * sq) * (w[1] - pathYaw);
     if (p.overspeed > 0) {
       // buffet
       angAcc[0] += p.overspeed * 3 * Math.sin(p.time * 37);
@@ -498,7 +535,7 @@
       var vLong = v3.dot(vPt, fwdG), vLat = v3.dot(vPt, latG);
       var muL = mu + (wh.brake ? P.muBrake * p.brake : 0);
       var fLong = -N * muL * sat(vLong / 0.3);
-      var fLat = -N * P.muLat * sat(vLat / 0.8);
+      var fLat = -N * P.muLat * sat(vLat / 0.15);          // stiff sideways: tyres don't creep
       v3.scale(fC, nrm, N);
       v3.scaleAndAdd(fC, fC, fwdG, fLong);
       v3.scaleAndAdd(fC, fC, latG, fLat);
@@ -685,7 +722,7 @@
     if (p.crashed) {
       // wreck: engine winds down, nothing moves
       p.rpm = M.damp(p.rpm, 0, 1.5, Math.min(dt, 0.1));
-      p.throttle = 0; p.stall = false; p.stallWarning = 0; p.smoke = false;
+      p.throttle = 0; p.stall = false; p.stallWarning = 0; p.stallProtect = 0; p.smoke = false;
       v3.set(p.vel, 0, 0, 0); v3.set(p.angVel, 0, 0, 0);
       p.airspeed = 0; p.groundSpeed = 0; p.verticalSpeed = 0; p.gForce = 1;
       return NO_EVENTS;

@@ -478,7 +478,9 @@
     '    float body = 0.16 + 0.5 * sun + 0.12 * max(N.y, 0.0);',
     '    vec3 c = col * (body + 0.6 * rim + 1.5 * chase) * pulse * u_intensity;',
     '    c += vec3(1.0, 0.95, 0.85) * spec * 0.5 * u_intensity * (1.0 - 0.7 * u_nightFactor);',
-    '    c = c * vis + col * u_flash * 6.0;',
+    '    // pass flash: brighten the shaded ring and add a moderate glow (a flat x6 add saturated',
+    '    // the whole torus to one unshaded yellow)',
+    '    c = c * vis * (1.0 + u_flash * 3.0) + col * u_flash * 2.0;',
     '    outColor = vec4(finalColor(c) * u_alpha, u_alpha * 0.85);',
     '  } else if (u_mode < 1.5) {',
     '    float g = exp(-v_k * v_k * 5.0) * (1.0 - abs(v_k));',
@@ -665,16 +667,25 @@
         alpha = 0.25 + 0.75 * M.smoothstep(0.1, 0.5, r.glow);
         cur = M.smoothstep(0.5, 1.0, r.glow);
       }
+      // The halo and membrane are additive and gamma-encoded, so even their faint light lifts
+      // everything behind them by 20-60/255: fine as a beacon on a small far ring, but a pale
+      // veil over the whole view as the ring fills the screen. Fade both out on approach (the
+      // passed ring keeps its halo: that carries the pass flash).
+      var dCam = v3.dist(r.pos, frame.camPos);
+      var haloFade = r.passed ? 1 : M.smoothstep(r.radius * 0.8, r.radius * 3, dCam);
+      var discFade = M.smoothstep(r.radius * 1.2, r.radius * 5, dCam);
       // torus
       gl.enable(gl.CULL_FACE);
       setRing(r, radius, 0, inten, alpha, cur, flash, r.col);
       G.drawMesh(gl, meshTorus);
       // glow band (+ membrane for the current ring)
       gl.disable(gl.CULL_FACE);
-      setRing(r, radius, 1, inten * (0.4 + 0.6 * r.glow), alpha, cur, flash, r.col);
-      G.drawMesh(gl, meshHalo);
-      if (cur > 0.01 && !r.passed) {
-        setRing(r, radius, 2, cur, 1, cur, 0, r.col);
+      if (haloFade > 0.005) {
+        setRing(r, radius, 1, inten * (0.4 + 0.6 * r.glow) * haloFade, alpha, cur, flash, r.col);
+        G.drawMesh(gl, meshHalo);
+      }
+      if (cur * discFade > 0.01 && !r.passed) {
+        setRing(r, radius, 2, cur * discFade, 1, cur, 0, r.col);
         G.drawMesh(gl, meshDisc);
       }
     }

@@ -1,15 +1,17 @@
 /*
  * Ridgeline — RL.Sky: the sky dome and the clouds.
  *
- * draw(frame): full-screen triangle at the far plane, drawn after the opaque geometry with the
- *   depth test on so it only fills the background; view rays reconstructed from u_invViewProj. skyColor() from
- *   the shared shader lib, a crisp sun disc with bloom (by night u_sunDir is the moon: a cratered,
- *   gibbous moon with a halo), procedural stars with twinkle and a faint milky way.
+ * draw(frame): full-screen triangle at the far plane (depth 1.0), drawn after the opaque geometry
+ *   with the depth test on (LEQUAL) and depth writes off, so it only shades the pixels nothing
+ *   else covered; view rays reconstructed from u_invViewProj. skyColor() from the shared shader
+ *   lib, a crisp sun disc with bloom (by night u_sunDir is the moon: a cratered, gibbous moon with
+ *   a halo), procedural stars with twinkle and a faint milky way.
  * drawClouds(frame): cumulus built from camera-facing puffs (procedural texture atlas made once),
  *   clustered into clouds at 900-1700 m, drifting with Config.wind (the caps over thermals stay
  *   put), lit per pixel from the cluster shape (bright tops / sun side, shaded bases, silver
- *   lining towards the sun), fogged, sorted back to front, faded near the camera, plus a soft
- *   white-out when the camera is inside a cloud.
+ *   lining towards the sun), fogged, sorted back to front, faded near the camera and where a puff
+ *   sinks into the terrain (so peaks never cut hard edges through a cloud), plus a soft white-out
+ *   when the camera is inside a cloud.
  */
 (function (RL) {
   'use strict';
@@ -139,7 +141,9 @@
     '  v_cluster = vec4(i_cluster.xyz, i_misc.y);',
     '  v_radius = i_cluster.w;',
     '  v_wpos = wp;',
-    '  gl_Position = u_viewProj * vec4(wp, 1.0);',
+    '  // every fragment of a puff this faint is discarded anyway (texture alpha <= 1): move the quad',
+    '  // off-screen so a camera-filling puff costs no fill rate',
+    '  gl_Position = v_shape.z < 0.003 ? vec4(2.0, 2.0, 2.0, 1.0) : u_viewProj * vec4(wp, 1.0);',
     '}'
   ].join('\n');
 
@@ -157,7 +161,8 @@
     '  // thin cloud near the silhouette (seen from the camera) scatters sunlight forward',
     '  float thin = smoothstep(0.45, 1.05, length(cross(V, rel)) / max(radius, 1.0));',
     '  vec3 c = u_sunColor * (lit * 0.58 + fwd * thin * 1.2);',
-    '  c += u_ambientSky * (0.75 + 0.45 * hf) + u_ambientGround * 0.4;',
+    '  // skylight reaches the flat bases less than the domed tops, so bases read grey from below',
+    '  c += (u_ambientSky * (0.75 + 0.45 * hf) + u_ambientGround * 0.4) * mix(0.6, 1.0, hf);',
     '  return c * (1.0 - 0.3 * u_nightFactor);',
     '}'
   ].join('\n');
@@ -234,6 +239,10 @@
   var nPuffs = 0;
   var order = null, dist2 = null, instData = null;
   var clusterPos = null;       // Float64Array per cluster: x, z (current, after drift)
+  var clusterStart = null;     // Int32Array: first puff of each cluster (puffs are grouped) + end
+  // Terrain clearance fade per puff (1 = clear of the ground). Refreshed for one cluster per frame
+  // (round robin) as the clouds drift, so the terrain taps cost next to nothing per frame.
+  var puffGround = null, groundDone = null, groundCursor = 0;
 
   function buildClouds(low) {
     var rnd = M.rng((C.seed ^ 0xC10D5) >>> 0);
@@ -274,15 +283,38 @@
     nPuffs = puffs.length;
     puffLocal = new Float32Array(nPuffs * 8);
     puffCluster = new Int16Array(nPuffs);
+    clusterStart = new Int32Array(list.length + 1);
     for (i = 0; i < nPuffs; i++) {
       for (k = 0; k < 8; k++) puffLocal[i * 8 + k] = puffs[i][k];
       puffCluster[i] = puffs[i][8];
+      clusterStart[puffs[i][8] + 1] = i + 1;
     }
+    puffGround = new Float32Array(nPuffs).fill(1);
+    groundDone = new Uint8Array(list.length);
+    groundCursor = 0;
     order = new Uint16Array(nPuffs);
     for (i = 0; i < nPuffs; i++) order[i] = i;
     dist2 = new Float32Array(nPuffs);
     instData = new Float32Array(nPuffs * 16);
     clusterPos = new Float64Array(clusters.length * 2);
+  }
+
+  /**
+   * Fades the puffs of cluster ci by their clearance above the terrain (5 height taps around each
+   * puff): a puff whose billboard would slice into a mountain side dissolves instead of showing a
+   * hard, jagged cut. Needs the terrain; until it is ready the puffs stay unfaded.
+   */
+  function updateGroundFade(ci) {
+    var W = RL.World;
+    if (!W || !RL.Terrain || !RL.Terrain.ready) return;
+    var cx = clusterPos[ci * 2], cz = clusterPos[ci * 2 + 1], base = clusters[ci].base;
+    for (var i = clusterStart[ci]; i < clusterStart[ci + 1]; i++) {
+      var o = i * 8, px = cx + puffLocal[o], pz = cz + puffLocal[o + 2], sz = puffLocal[o + 3], r = sz * 0.5;
+      var th = Math.max(W.heightAt(px, pz), W.heightAt(px + r, pz), W.heightAt(px - r, pz),
+        W.heightAt(px, pz + r), W.heightAt(px, pz - r));
+      puffGround[i] = sstep(0, sz * 0.8, base + puffLocal[o + 1] - th);
+    }
+    groundDone[ci] = 1;
   }
 
   function wrap(v) {
@@ -368,6 +400,12 @@
         if (q < 1) inside = Math.max(inside, sstep(1.0, 0.5, q));
       }
       Sky.whiteout = inside;
+      // terrain clearance: new clusters at once, then one drifting cluster per frame
+      for (i = 0; i < clusters.length; i++) if (!groundDone[i]) updateGroundFade(i);
+      for (k = 0; k < clusters.length; k++) {
+        groundCursor = (groundCursor + 1) % clusters.length;
+        if (!clusters[groundCursor].anchored) { updateGroundFade(groundCursor); break; }
+      }
       // puff world positions + distance for sorting
       for (i = 0; i < nPuffs; i++) {
         var ci = puffCluster[i], o = i * 8;
@@ -391,8 +429,10 @@
         var wx = clusterPos[ci * 2], wz = clusterPos[ci * 2 + 1];
         // fade out drifting clouds near the wrap seam so they never pop
         var edgeFade = c.anchored ? 1 : 1 - sstep(WRAP - 2500, WRAP - 300, Math.max(Math.abs(wx), Math.abs(wz)));
-        var alpha = puffLocal[o + 7] * edgeFade;
+        var alpha = puffLocal[o + 7] * edgeFade * puffGround[i];
         if (alpha < 0.01) continue;
+        // the camera is within the vertex shader's nearFade radius: fully faded, skip the upload
+        if (dist2[i] < 0.1225 * puffLocal[o + 3] * puffLocal[o + 3]) continue;
         var b = n * 16;
         instData[b] = wx + puffLocal[o];
         instData[b + 1] = c.base + puffLocal[o + 1];

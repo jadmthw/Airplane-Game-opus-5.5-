@@ -12,9 +12,18 @@
  * fragment shader from the un-animated model-space position) stays continuous across hinges.
  *
  * Materials (uv.x of every vertex): 0 plain vertex colour, 1 wing livery, 2 fuselage, 3 cowling,
- * 4 tail surfaces, 5 spinner swirl, 6 prop blade, 7 tyre/rubber, 8 instrument dial, 9 metal.
+ * 4 tail surfaces, 5 spinner swirl, 6 prop blade, 7 tyre/rubber, 8 instrument dial, 9 metal,
+ * 10 matte cockpit interior.
  * Transparent pass (drawLights): canopy glass, prop blur disc, additive glow sprites for the
  * nav lights / strobes / beacon / landing light.
+ *
+ * Cockpit view (opts.cockpit): the fuselage skin over the cockpit opening is left out
+ * ('bodyCockpit') and an interior is drawn instead - side walls and sills, floor, seat, a glare
+ * shield over a tilted instrument panel with live gauges (airspeed, attitude, altimeter, G,
+ * heading, vertical speed, rpm, oil, fuel, flaps, gear and stall lamps; dial faces drawn
+ * procedurally from u_inst, lit at night), a stick and throttle that follow the controls. The
+ * seat sits just aft of the wing, as in most aerobatic monoplanes, so the wing roots show in the
+ * lower corners of the forward view. Everything is laid out from EYE (= cockpitOffset).
  */
 (function (RL) {
   'use strict';
@@ -41,6 +50,28 @@
   var MAIN_WHEEL_R = 0.27, NOSE_WHEEL_R = 0.24;
   var GEAR_H = 1.45;
   var FLAP_MAX = 35 * DEG, AIL_MAX = 20 * DEG, ELEV_MAX = 25 * DEG, RUD_MAX = 25 * DEG;
+
+  // Cockpit layout. The opening spans two existing fuselage lathe rings (z 0.40 and 1.40) so the
+  // skin over it can be dropped facet-exactly; its edge is the facet ring 60 deg from the top.
+  var EYE = [0, 0.82, 1.05];
+  var CANOPY = { y: 0.4, z: 0.7, rx: 0.42, ry: 0.6, rz: 1.12 };
+  var PIT = { z0: 0.40, z1: 1.40, floorY: -0.02, sillY: 0.45, cutDeg: 60 };
+  // instrument panel: a flat board tilted back (top away from the pilot) to face the eye
+  var PANEL_TILT = 16 * DEG;
+  var PANEL = { c: [0, 0.515, 0.425], halfW: 0.41, halfH: 0.165,
+    up: [0, Math.cos(PANEL_TILT), -Math.sin(PANEL_TILT)], n: [0, Math.sin(PANEL_TILT), Math.cos(PANEL_TILT)] };
+  var GAUGE_R = [0.048, 0.027, 0.012];              // big dial, small dial, lamp
+  // [type, u, v] on the panel (u right, v up from PANEL.c). Types match dial() in the shader.
+  var GAUGES = [
+    [0, -0.112, 0.062], [1, 0, 0.062], [2, 0.112, 0.062],          // airspeed, attitude, altimeter
+    [3, -0.112, -0.052], [4, 0, -0.052], [5, 0.112, -0.052],       // G meter, heading, vertical speed
+    [6, 0.24, 0.062],                                               // rpm
+    [7, 0.208, -0.054], [8, 0.274, -0.054],                         // oil, fuel
+    [9, -0.25, -0.054],                                             // flaps
+    [10, -0.25, 0.104], [10, -0.272, 0.076], [10, -0.228, 0.076],   // gear lamps (nose, left, right)
+    [11, -0.25, 0.026]                                              // stall warning lamp
+  ];
+  var STICK_PIVOT = [0, 0.0, 0.78], THROTTLE_PIVOT = [-0.335, 0.30, 0.74];
 
   // ------------------------------------------------------------------ geometry helpers
   var tmpA = [0, 0, 0], tmpB = [0, 0, 0], tmpN = [0, 0, 0];
@@ -184,8 +215,8 @@
     var intake = latheZ([[0.35, 3.24], [0.001, 3.25]], 12, COL.dark, 0, 0.9, 1);
     var g = newGeo();
     append(g, body); append(g, cowl); append(g, intake);
-    // turtle-deck spine behind the canopy
-    var spine = latheZ([[0.001, -3.0], [0.1, -2.2], [0.16, -1.0], [0.2, -0.55]], 6, COL.cream, 2, 1, 1);
+    // turtle-deck spine behind the canopy (front end closed: it is seen from the cockpit)
+    var spine = latheZ([[0.001, -3.2], [0.1, -2.6], [0.16, -1.95], [0.2, -1.62], [0.15, -1.51], [0.001, -1.46]], 6, COL.cream, 2, 1, 1);
     RL.Geo.translate(spine, 0, 0.47, 0);
     for (i = 0; i < spine.positions.length; i += 3) spine.positions[i + 1] += 0.2 * M.smoothstep(0.3, 3.0, spine.positions[i + 2]);
     append(g, spine);
@@ -200,6 +231,31 @@
     var scoop = RL.Geo.box(0.34, 0.12, 0.7, COL.red);
     RL.Geo.translate(scoop, 0, -0.5, -2.55);
     append(g, flat(scoop, COL.red, 3));
+    return g;
+  }
+
+  /**
+   * Copy of a flat-shaded geo without the fuselage skin over the cockpit opening: facets whose
+   * centroid lies between the opening's rings and within PIT.cutDeg of the top of the lathe.
+   */
+  function cutCockpit(src) {
+    var g = newGeo(), P = src.positions, ix = src.indices;
+    var cosCut = Math.cos(PIT.cutDeg * DEG);
+    for (var t = 0; t < ix.length; t += 3) {
+      var cx = 0, cy = 0, cz = 0, k;
+      for (k = 0; k < 3; k++) { cx += P[ix[t + k] * 3]; cy += P[ix[t + k] * 3 + 1]; cz += P[ix[t + k] * 3 + 2]; }
+      cx /= 3; cy /= 3; cz /= 3;
+      var ux = cx / 0.9, rr = Math.sqrt(ux * ux + cy * cy);       // undo the lathe's 0.9 x-scale
+      if (cz > PIT.z0 + 1e-3 && cz < PIT.z1 - 1e-3 && rr > 0.3 && cy / rr > cosCut) continue;
+      for (k = 0; k < 3; k++) {
+        var i = ix[t + k];
+        g.positions.push(P[i * 3], P[i * 3 + 1], P[i * 3 + 2]);
+        g.normals.push(src.normals[i * 3], src.normals[i * 3 + 1], src.normals[i * 3 + 2]);
+        g.colors.push(src.colors[i * 3], src.colors[i * 3 + 1], src.colors[i * 3 + 2]);
+        g.uvs.push(src.uvs[i * 2], src.uvs[i * 2 + 1]);
+        g.indices.push(g.positions.length / 3 - 1);
+      }
+    }
     return g;
   }
 
@@ -265,27 +321,56 @@
     return g;
   }
 
+  /** Ring (or open arc) of quads with a rectangular section (w across the ring, d along `axis`). */
+  function ringLoop(g, pts, outs, axis, w, d, col, open) {
+    var n = pts.length, loops = [];
+    for (var k = 0; k < n; k++) {
+      var p = pts[k], o = outs[k], L = [];
+      var sgn = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+      for (var e = 0; e < 4; e++) {
+        L.push([p[0] + o[0] * w * sgn[e][0] + axis[0] * d * sgn[e][1], p[1] + o[1] * w * sgn[e][0] + axis[1] * d * sgn[e][1],
+          p[2] + o[2] * w * sgn[e][0] + axis[2] * d * sgn[e][1]]);
+      }
+      loops.push(L);
+    }
+    for (k = 0; k < (open ? n - 1 : n); k++) {
+      var A = loops[k], B = loops[(k + 1) % n], c = centroid([A, B]);
+      for (e = 0; e < 4; e++) {
+        var e1 = (e + 1) % 4;
+        tri(g, A[e], A[e1], B[e1], col, 0, c);
+        tri(g, A[e], B[e1], B[e], col, 0, c);
+      }
+    }
+  }
+
   function buildCanopyFrame() {
-    var g = newGeo();
-    // windscreen bow and rear hoop: thin tori squashed onto the bubble's cross-section
-    var hoops = [-0.92, 0.55];
+    var g = newGeo(), n = 32, k, a, pts = [], outs = [];
+    // hoops on the bubble's cross-section: the windscreen bow (the windscreen / canopy split,
+    // right above the instrument panel: from the cockpit it arches over the top of the view,
+    // clear of the horizon) and the rear hoop
+    var hoops = [[PANEL.c[2] + 0.05 - CANOPY.z, 0.007, 0.014], [0.88, 0.01, 0.016]];
     for (var i = 0; i < hoops.length; i++) {
-      var z = hoops[i], f = Math.sqrt(Math.max(0, 1 - Math.pow((z - CANOPY.z) / CANOPY.rz, 2)));
-      var t = RL.Geo.torus(1, 0.028, 4, 18, COL.navy);
-      RL.Geo.scale(t, CANOPY.rx * f + 0.01, CANOPY.ry * f + 0.01, 1);
-      RL.Geo.translate(t, 0, CANOPY.y, z);
-      append(g, flat(t, COL.navy, 0));
+      var dz = hoops[i][0], f = Math.sqrt(Math.max(0, 1 - Math.pow(dz / CANOPY.rz, 2)));
+      var rx = CANOPY.rx * f + 0.012, ry = CANOPY.ry * f + 0.012;
+      pts = []; outs = [];
+      for (k = 0; k <= n / 2; k++) {                       // upper half: it stands on the rail
+        a = k / (n / 2) * Math.PI;
+        pts.push([Math.cos(a) * rx, CANOPY.y + Math.sin(a) * ry, CANOPY.z + dz]);
+        outs.push(v3.normalize([0, 0, 0], [Math.cos(a) / rx, Math.sin(a) / ry, 0]));
+      }
+      ringLoop(g, pts, outs, [0, 0, 1], hoops[i][1], hoops[i][2], COL.navy, true);
     }
-    // canopy rails
-    for (var s = -1; s <= 1; s += 2) {
-      var rail = RL.Geo.box(0.04, 0.04, 2.0, COL.navy);
-      RL.Geo.translate(rail, s * (CANOPY.rx - 0.02), CANOPY.y + 0.01, CANOPY.z);
-      append(g, flat(rail, COL.navy, 0));
+    // canopy rail: follows the elliptical base of the bubble
+    pts = []; outs = [];
+    for (k = 0; k < n; k++) {
+      a = k / n * Math.PI * 2;
+      pts.push([Math.cos(a) * (CANOPY.rx + 0.012), CANOPY.y + 0.008, CANOPY.z + Math.sin(a) * (CANOPY.rz + 0.012)]);
+      outs.push(v3.normalize([0, 0, 0], [Math.cos(a) / CANOPY.rx, 0, Math.sin(a) / CANOPY.rz]));
     }
+    ringLoop(g, pts, outs, [0, 1, 0], 0.022, 0.028, COL.navy);
     return g;
   }
 
-  var CANOPY = { y: 0.4, z: -0.05, rx: 0.42, ry: 0.56, rz: 1.05 };
   function buildCanopyGlass() {
     var prof = [[1.0, 0.0], [0.97, 0.25], [0.87, 0.5], [0.66, 0.75], [0.38, 0.93], [0.001, 1.0]];
     var g = RL.Geo.lathe(prof, 20, [0.6, 0.75, 0.9]);
@@ -296,53 +381,181 @@
   }
 
   function buildPilot() {
-    var g = newGeo();
+    // seated so that the eye (visor) is at EYE, the cockpit camera's point of view
+    var g = newGeo(), hz = EYE[2] + 0.1;
     var head = RL.Geo.sphere(0.14, 8, 6, COL.helmet);
     RL.Geo.scale(head, 1, 1.05, 1.1);
-    RL.Geo.translate(head, 0, 0.68, 0.16);
+    RL.Geo.translate(head, 0, EYE[1] - 0.03, hz);
     append(g, flat(head, COL.helmet, 0));
     var stripe = RL.Geo.box(0.05, 0.03, 0.3, COL.red);
-    RL.Geo.translate(stripe, 0, 0.815, 0.16);
+    RL.Geo.translate(stripe, 0, EYE[1] + 0.105, hz);
     append(g, flat(stripe, COL.red, 0));
     var visor = RL.Geo.box(0.22, 0.08, 0.06, COL.visor);
-    RL.Geo.translate(visor, 0, 0.68, 0.03);
+    RL.Geo.translate(visor, 0, EYE[1] - 0.03, hz - 0.13);
     append(g, flat(visor, COL.visor, 0));
-    var body = RL.Geo.box(0.46, 0.3, 0.3, COL.jacket);
-    RL.Geo.translate(body, 0, 0.44, 0.22);
+    var body = RL.Geo.sphere(1, 8, 5, COL.jacket);           // shoulders, rounded
+    RL.Geo.scale(body, 0.21, 0.16, 0.14);
+    RL.Geo.translate(body, 0, EYE[1] - 0.33, hz + 0.08);
     append(g, flat(body, COL.jacket, 0));
     return g;
   }
 
-  function buildPanel() {
-    // cockpit-view only: dark tub over the fuselage skin, glare shield, instrument panel
-    var g = newGeo();
-    var tub = RL.Geo.box(0.62, 0.06, 1.25, [0.22, 0.18, 0.15]);
-    RL.Geo.translate(tub, 0, 0.555, 0.08);
-    append(g, flat(tub, [0.22, 0.18, 0.15], 0));
-    // rounded coaming over the panel (half cylinder across the cockpit)
-    var glare = RL.Geo.cylinder(0.1, 0.1, 0.66, 8, COL.panel, { thetaStart: -Math.PI / 2, thetaLength: Math.PI });
-    RL.Geo.rotateZ(glare, Math.PI / 2);
-    RL.Geo.scale(glare, 1, 0.8, 1.6);
-    RL.Geo.translate(glare, 0, 0.53, -0.66);
-    append(g, flat(glare, COL.panel, 0));
-    // little whisky compass on the coaming
-    var comp = RL.Geo.cylinder(0.04, 0.045, 0.06, 10, [0.06, 0.06, 0.07]);
-    RL.Geo.translate(comp, 0, 0.64, -0.64);
-    append(g, flat(comp, [0.06, 0.06, 0.07], 0));
-    var lub = RL.Geo.box(0.006, 0.03, 0.006, [1, 1, 1]);
-    RL.Geo.translate(lub, 0, 0.645, -0.6);
-    append(g, flat(lub, [1, 1, 1], 0));
-    var face = RL.Geo.box(0.68, 0.2, 0.04, COL.panel);
-    RL.Geo.translate(face, 0, 0.49, -0.55);
-    append(g, flat(face, COL.panel, 0));
-    var dials = [[-0.22, 0.53], [-0.075, 0.53], [0.075, 0.53], [0.22, 0.53], [-0.15, 0.43], [0.0, 0.43], [0.15, 0.43]];
-    for (var i = 0; i < dials.length; i++) {
-      var d = RL.Geo.cylinder(0.052, 0.052, 0.02, 14, COL.panel);
-      RL.Geo.rotateX(d, Math.PI / 2);
-      RL.Geo.translate(d, dials[i][0], dials[i][1], -0.525);
-      // dial centre encoded in the vertex colour (the shader draws the face procedurally)
-      append(g, flat(d, [dials[i][0] + 0.5, dials[i][1], i / 8], 8));
+  // ---- cockpit interior (cockpit view only)
+  var COL_PIT = { wall: [0.21, 0.2, 0.19], floor: [0.13, 0.12, 0.115], sill: [0.12, 0.1, 0.09],
+    panel: [0.22, 0.228, 0.25], coaming: [0.07, 0.07, 0.075], pedal: [0.3, 0.3, 0.32], seat: [0.36, 0.1, 0.07], knob: [0.05, 0.05, 0.05] };
+
+  /** Closed prism through two convex loops (same point count). */
+  function prism(g, a, b, col, mat) {
+    var gg = newGeo();
+    loft(gg, [a, b], col, mat);
+    append(g, gg);
+  }
+
+  /** Quad facing away from `away` (a point on its back side). */
+  function quad(g, a, b, c, d, col, mat, away) {
+    tri(g, a, b, c, col, mat, away);
+    tri(g, a, c, d, col, mat, away);
+  }
+
+  /** Model-space point on the panel face: u right, v up, h out of the face. */
+  function panelPt(u, v, h) {
+    var c = PANEL.c, U = PANEL.up, N = PANEL.n;
+    return [c[0] + u, c[1] + U[1] * v + N[1] * h, c[2] + U[2] * v + N[2] * h];
+  }
+
+  /** A part authored face-up (+Y = out of the panel) at the origin, moved onto the panel at (u, v). */
+  function onPanel(geo, u, v, h) {
+    RL.Geo.rotateX(geo, Math.PI / 2 - PANEL_TILT);       // +Y -> panel normal
+    var p = panelPt(u, v, h);
+    RL.Geo.translate(geo, p[0], p[1], p[2]);
+    return geo;
+  }
+
+  // x of the cut edge (the facet ring PIT.cutDeg from the top) at the two opening rings
+  function cutX(z) {
+    var r = z < 0.9 ? 0.53 : 0.44;
+    return 0.9 * r * Math.sin(PIT.cutDeg * DEG);
+  }
+
+  function buildCockpit() {
+    var g = newGeo(), z0 = PIT.z0, z1 = PIT.z1, fy = PIT.floorY, sy = PIT.sillY;
+    var x0 = cutX(z0) - 0.004, x1 = cutX(z1) - 0.004;
+    var mid = [0, 0.3, 0.9];
+    // side walls (up to the sills) and floor, facing inward
+    for (var s = -1; s <= 1; s += 2) {
+      quad(g, [s * x0, fy, z0], [s * x0, sy, z0], [s * x1, sy, z1], [s * x1, fy, z1], COL_PIT.wall, 10, [s * 3, 0.3, 0.9]);
+      // padded sill along the top of the wall
+      var a = [[s * (x0 - 0.035), sy - 0.02, z0], [s * (x0 + 0.03), sy - 0.02, z0], [s * (x0 + 0.03), sy + 0.022, z0], [s * (x0 - 0.035), sy + 0.022, z0]];
+      var b = [[s * (x1 - 0.035), sy - 0.02, z1], [s * (x1 + 0.03), sy - 0.02, z1], [s * (x1 + 0.03), sy + 0.022, z1], [s * (x1 - 0.035), sy + 0.022, z1]];
+      prism(g, a, b, COL_PIT.sill, 10);
+      // side console with the trim wheel / fuel selector: a low box on each wall
+      var con = RL.Geo.box(0.07, 0.05, 0.36, COL_PIT.floor);
+      RL.Geo.translate(con, s * (x0 - 0.05), 0.2, 0.72);
+      append(g, flat(con, COL_PIT.floor, 10));
     }
+    quad(g, [-x0, fy, z0], [x0, fy, z0], [x1, fy, z1], [-x1, fy, z1], COL_PIT.floor, 10, [0, -3, 0.9]);
+    // rear bulkhead + seat back and headrest
+    quad(g, [-x1, fy, z1], [x1, fy, z1], [x1, sy + 0.08, z1], [-x1, sy + 0.08, z1], COL_PIT.wall, 10, [0, 0.3, 3]);
+    var back = RL.Geo.box(0.42, 0.5, 0.09, COL_PIT.seat);
+    RL.Geo.rotateX(back, 0.18);
+    RL.Geo.translate(back, 0, 0.3, z1 - 0.1);
+    append(g, flat(back, COL_PIT.seat, 10));
+    var seat = RL.Geo.box(0.44, 0.08, 0.42, COL_PIT.seat);
+    RL.Geo.translate(seat, 0, 0.1, z1 - 0.3);
+    append(g, flat(seat, COL_PIT.seat, 10));
+    // firewall / footwell under the panel, and the rudder pedals
+    var fwZ = z0 + 0.07;
+    quad(g, [-x0, fy, fwZ], [x0, fy, fwZ], [x0, 0.37, fwZ], [-x0, 0.37, fwZ], COL_PIT.floor, 10, [0, 0.3, -3]);
+    for (s = -1; s <= 1; s += 2) {
+      var ped = RL.Geo.box(0.08, 0.13, 0.03, COL_PIT.pedal);
+      RL.Geo.rotateX(ped, -0.4);
+      RL.Geo.translate(ped, s * 0.15, 0.1, fwZ + 0.08);
+      append(g, flat(ped, COL_PIT.pedal, 9));
+    }
+
+    // instrument panel board
+    var face = RL.Geo.box(PANEL.halfW * 2, PANEL.halfH * 2, 0.03, COL_PIT.panel);
+    RL.Geo.rotateX(face, -PANEL_TILT);
+    RL.Geo.translate(face, PANEL.c[0], PANEL.c[1], PANEL.c[2]);
+    append(g, flat(face, COL_PIT.panel, 10));
+    // glare shield: a hood from the panel top forward to the windscreen, with a padded lip
+    var top = panelPt(0, PANEL.halfH, 0);
+    var hood = [[-0.12, 0.54], [top[2] - 0.005, 0.54], [top[2] - 0.005, top[1]], [top[2] - 0.08, top[1] + 0.025],
+      [0.12, 0.662], [-0.12, 0.6]];
+    var hl = [], hr = [];
+    for (var i = 0; i < hood.length; i++) {
+      hl.push([-PANEL.halfW, hood[i][1], hood[i][0]]);
+      hr.push([PANEL.halfW, hood[i][1], hood[i][0]]);
+    }
+    prism(g, hl, hr, COL_PIT.coaming, 10);
+    var lip = RL.Geo.cylinder(0.018, 0.018, PANEL.halfW * 2, 8, COL_PIT.coaming);
+    RL.Geo.rotateZ(lip, Math.PI / 2);
+    RL.Geo.translate(lip, 0, top[1] + 0.012, top[2] + 0.02);
+    append(g, flat(lip, COL_PIT.coaming, 10));
+    // whisky compass on the right of the glare shield (clear of the view over the nose)
+    var comp = RL.Geo.box(0.07, 0.055, 0.06, COL_PIT.knob);
+    RL.Geo.translate(comp, 0.27, top[1] + 0.045, top[2] - 0.03);
+    append(g, flat(comp, COL_PIT.knob, 0));
+    var card = RL.Geo.box(0.045, 0.025, 0.004, [0.9, 0.88, 0.8]);
+    RL.Geo.translate(card, 0.27, top[1] + 0.048, top[2] + 0.001);
+    append(g, flat(card, [0.9, 0.88, 0.8], 0));
+
+    // gauges: a bezel ring and a dial face per instrument. The dial's panel position and type
+    // are encoded in its vertex colour (the shader draws the face procedurally).
+    for (i = 0; i < GAUGES.length; i++) {
+      var gd = GAUGES[i], type = gd[0], R = GAUGE_R[type < 7 ? 0 : type < 10 ? 1 : 2];
+      var bez = RL.Geo.cylinder(R * 1.1, R * 1.15, 0.012, 16, COL.dark);
+      append(g, flat(onPanel(bez, gd[1], gd[2], 0.018), COL.dark, 9));
+      var d = RL.Geo.cylinder(R, R, 0.006, 20, COL_PIT.panel);
+      append(g, flat(onPanel(d, gd[1], gd[2], 0.023), [gd[1] + 0.5, gd[2] + 0.5, type / 32], 8));
+    }
+    // a row of toggle switches and the magneto key along the bottom of the panel
+    for (i = 0; i < 6; i++) {
+      var u = -0.32 + i * 0.045;
+      if (i === 5) u = 0.33;
+      var sw = RL.Geo.cylinder(0.005, 0.006, 0.03, 6, COL.metal);
+      RL.Geo.rotateX(sw, 0.35);
+      append(g, flat(onPanel(sw, u, -0.125, 0.03), COL.metal, 9));
+      var base = RL.Geo.cylinder(0.011, 0.011, 0.01, 8, COL.dark);
+      append(g, flat(onPanel(base, u, -0.125, 0.018), COL.dark, 0));
+    }
+    return g;
+  }
+
+  function buildStick() {
+    var g = newGeo(), p = STICK_PIVOT;
+    var boot = RL.Geo.cone(0.06, 0.1, 8, COL_PIT.floor);
+    RL.Geo.translate(boot, p[0], p[1] + 0.05, p[2]);
+    append(g, flat(boot, COL_PIT.floor, 10));
+    var shaft = RL.Geo.cylinder(0.013, 0.016, 0.42, 6, COL.metal);
+    RL.Geo.translate(shaft, p[0], p[1] + 0.21, p[2]);
+    append(g, flat(shaft, COL.metal, 9));
+    var grip = RL.Geo.cylinder(0.024, 0.021, 0.13, 8, COL_PIT.knob);
+    RL.Geo.translate(grip, p[0], p[1] + 0.47, p[2]);
+    append(g, flat(grip, COL_PIT.knob, 0));
+    var btn = RL.Geo.box(0.02, 0.012, 0.02, COL.red);
+    RL.Geo.translate(btn, p[0], p[1] + 0.54, p[2] - 0.01);
+    append(g, flat(btn, COL.red, 0));
+    return g;
+  }
+
+  function buildThrottle() {
+    var g = newGeo(), p = THROTTLE_PIVOT;
+    var quadrant = RL.Geo.box(0.05, 0.06, 0.24, COL_PIT.floor);
+    RL.Geo.translate(quadrant, p[0], p[1] - 0.02, p[2]);
+    append(g, flat(quadrant, COL_PIT.floor, 10));
+    return g;
+  }
+
+  function buildThrottleLever() {
+    var g = newGeo(), p = THROTTLE_PIVOT;
+    var arm = RL.Geo.box(0.012, 0.16, 0.018, COL.metal);
+    RL.Geo.translate(arm, p[0], p[1] + 0.08, p[2]);
+    append(g, flat(arm, COL.metal, 9));
+    var knob = RL.Geo.sphere(0.026, 8, 6, COL_PIT.knob);
+    RL.Geo.scale(knob, 0.9, 1, 1.25);
+    RL.Geo.translate(knob, p[0], p[1] + 0.17, p[2]);
+    append(g, flat(knob, COL_PIT.knob, 0));
     return g;
   }
 
@@ -505,143 +718,296 @@
     '}'
   ].join('\n');
 
-  var FS = [
-    'in vec3 v_world; in vec3 v_normal; in vec3 v_local; in vec3 v_lnormal; in vec3 v_color;',
-    'flat in int v_mat;',
-    'uniform float u_char;',
-    'out vec4 outColor;',
-    'const vec3 CREAM = vec3(0.95, 0.91, 0.82);',
-    'const vec3 RED = vec3(0.84, 0.16, 0.10);',
-    'const vec3 ORANGE = vec3(0.98, 0.50, 0.10);',
-    'const vec3 NAVY = vec3(0.10, 0.14, 0.30);',
-    // anti-aliased step
-    'float aa(float edge, float x) { float w = fwidth(x) * 0.7 + 1e-5; return smoothstep(edge - w, edge + w, x); }',
-    'float band(float x, float a, float b) { return aa(a, x) * (1.0 - aa(b, x)); }',
-    // 3x5 pixel font: R L - 2 6
-    'int glyph(int c) {',
-    '  if (c == 0) return 27565; if (c == 1) return 18727; if (c == 2) return 448;',
-    '  if (c == 3) return 29671; return 14831;',
-    '}',
-    // p: text-space (x in pixel columns, y in rows from the top); chars from `first`, `count` long
-    'float textMask(vec2 p, int first, int count) {',
-    '  if (p.x < 0.0 || p.y < 0.0 || p.y >= 5.0) return 0.0;',
-    '  int ci = int(floor(p.x / 4.0));',
-    '  if (ci >= count) return 0.0;',
-    '  int col = int(floor(mod(p.x, 4.0)));',
-    '  if (col > 2) return 0.0;',
-    '  int row = int(floor(p.y));',
-    '  int bit = 14 - (row * 3 + col);',
-    '  return float((glyph(first + ci) >> bit) & 1);',
-    '}',
-    // sunburst: alternating rays around a focal point, limited to radius r1
-    'float rays(vec2 d, float period, float a0, float a1) {',
-    '  float a = atan(d.x, -d.y);',
-    '  float inside = band(a, a0, a1);',
-    '  float s = fract((a - a0) / period);',
-    '  return inside * (aa(0.08, s) * (1.0 - aa(0.55, s)));',
-    '}',
-    'vec3 livery(int m, vec3 P, vec3 N, vec3 base, out float spec, out float emis) {',
-    '  spec = 0.35; emis = 0.0;',
-    '  vec3 c = base;',
-    '  float ax = abs(P.x);',
-    '  if (m == 1) {',                                   // wings
-    '    c = CREAM;',
-    '    if (N.y > 0.0) {',
-    '      vec2 d = vec2(ax - 0.5, P.z - 0.95);',
-    '      float r = length(d);',
-    '      float ray = rays(d, 0.2, 0.1, 1.5) * (1.0 - aa(2.05, r));',
-    '      c = mix(c, RED, ray);',
-    '      c = mix(c, ORANGE, band(r, 2.05, 2.16) * band(atan(d.x, -d.y), 0.1, 1.5));',
-    '      if (P.x > 0.0) c = mix(c, NAVY, textMask(vec2((P.x - 2.35) / 0.088, (P.z + 0.28) / 0.088), 0, 5));',
-    '    } else {',
-    '      float s = fract((ax * 0.8 + P.z * 0.9) / 1.15);',
-    '      c = mix(c, RED, band(s, 0.0, 0.34) * (1.0 - aa(2.2, ax)) * aa(0.6, ax));',
-    '      if (P.x < 0.0) c = mix(c, NAVY, textMask(vec2((P.x + 4.0) / 0.088, (P.z + 0.28) / 0.088), 0, 5));',
-    '    }',
-    '    c = mix(c, ORANGE, band(ax, 3.93, 4.0));',
-    '    c = mix(c, RED, aa(4.0, ax));',
-    '  } else if (m == 2) {',                            // fuselage
-    '    c = CREAM;',
-    '    float t = clamp((P.z + 1.9) / 6.0, 0.0, 1.0);',
-    '    float yc = -0.06 + 0.3 * t * t;',
-    '    float hw = mix(0.13, 0.022, t);',
-    '    float side = smoothstep(0.25, 0.45, abs(N.x));',
-    '    c = mix(c, RED, band(P.y - yc, -hw, hw) * side);',
-    '    c = mix(c, ORANGE, band(P.y - yc, hw + 0.03, hw + 0.065) * side);',
-    '    c = mix(c, RED, band(ax, 0.0, 0.07) * step(0.35, P.y) * step(0.9, P.z));',
-    '    c = mix(c, NAVY, (1.0 - aa(0.2 + 0.06 * clamp(-P.z - 0.9, 0.0, 1.0), ax)) * step(0.3, P.y) * band(-P.z, 0.85, 1.9));',
-    '    c = mix(c, vec3(0.78, 0.8, 0.82), smoothstep(-0.55, -0.8, N.y) * step(P.y, -0.2));',
-    '  } else if (m == 3) {',                            // cowling
-    '    c = RED;',
-    '    c = mix(c, ORANGE, aa(3.05, -P.z));',
-    '    c = mix(c, NAVY, band(-P.z, 1.88, 1.98));',
-    '    spec = 0.5;',
-    '  } else if (m == 4) {',                            // tail surfaces
-    '    c = CREAM;',
-    '    if (abs(N.x) > 0.5) {',
-    '      vec2 d = vec2(P.z - 3.0, -(P.y - 0.15));',
-    '      c = mix(c, RED, rays(vec2(d.x, d.y), 0.24, 0.3, 1.45));',
-    '      c = mix(c, RED, aa(1.18, P.y));',
-    '      c = mix(c, ORANGE, band(P.y, 1.1, 1.16));',
-    '      float tz = N.x > 0.0 ? (3.98 - P.z) : (P.z - 3.43);',
-    '      c = mix(c, NAVY, textMask(vec2(tz / 0.075, (0.9 - P.y) / 0.075), 3, 2));',
-    '    } else {',
-    '      c = mix(c, RED, aa(1.2, ax));',
-    '      c = mix(c, ORANGE, band(ax, 1.12, 1.18));',
-    '      c = mix(c, RED, band(P.z, 3.0, 3.3) * step(0.25, ax));',
-    '    }',
-    '  } else if (m == 5) {',                            // spinner swirl
-    '    float a = atan(P.y, P.x) / 6.2831853;',
-    '    float s = fract(a * 2.0 + (-P.z - 3.2) * 2.2);',
-    '    c = mix(CREAM, RED, band(s, 0.0, 0.5));',
-    '    spec = 0.7;',
-    '  } else if (m == 6) {',                            // prop blades
-    '    float r = length(P.xy);',
-    '    c = mix(base, vec3(1.0, 0.8, 0.1), aa(0.76, r));',
-    '    spec = 0.3;',
-    '  } else if (m == 7) {',                            // tyres
-    '    spec = 0.05;',
-    '  } else if (m == 8) {',                            // instrument dials (centre in base.xy)
-    '    vec2 d = P.xy - vec2(base.x - 0.5, base.y);',
-    '    float r = length(d) / 0.052;',
-    '    float ang = atan(d.x, d.y);',
-    '    float needleA = (base.z * 8.0 * 1.7 + 0.6) + 0.35 * sin(u_time * (0.3 + base.z));',
-    '    float nd = abs(sin(ang - needleA)) * r;',
-    '    float needle = (1.0 - aa(0.07, nd)) * step(cos(ang - needleA), 0.0) * (1.0 - aa(0.85, r));',
-    '    float ticks = band(r, 0.7, 0.86) * aa(0.8, abs(cos(ang * 6.0)));',
-    '    float rim = band(r, 0.9, 1.0);',
-    '    c = vec3(0.03, 0.035, 0.04);',
-    '    c = mix(c, vec3(0.85, 0.85, 0.8), max(ticks, rim));',
-    '    c = mix(c, vec3(1.0, 0.55, 0.15), needle);',
-    '    spec = 0.6; emis = max(ticks, needle);',
-'  } else if (m == 9) {',                            // metal
-    '    spec = 0.8;',
-    '  }',
-    '  return c;',
-    '}',
-    'void main() {',
-    '  vec3 N = normalize(v_normal);',
-    '  if (!gl_FrontFacing) N = -N;',
-    '  float spec, emis;',
-    '  vec3 alb = livery(v_mat, v_local, normalize(v_lnormal), v_color, spec, emis);',
-    '  // soot when crashed',
-    '  float soot = u_char * (0.55 + 0.45 * vnoise(v_local.xz * 3.0 + v_local.y * 2.0));',
-    '  alb = mix(alb, vec3(0.05, 0.045, 0.04), clamp(soot, 0.0, 0.92));',
-    '  spec *= 1.0 - u_char * 0.8;',
-    '  vec3 lin = toLinear(alb);',
-    '  float sh = shadowFactor(v_world, N);',
-    '  sh = mix(1.0, sh, 0.85);',
-    '  vec3 col = shadeLit(lin, N, v_world, sh, spec, 48.0);',
-    '  // gentle sky-reflection rim so the paint reads glossy against the sky',
-    '  vec3 V = normalize(u_camPos - v_world);',
-    '  float fr = pow(1.0 - max(dot(N, V), 0.0), 4.0);',
-    '  col += skyColor(reflect(-V, N)) * fr * spec * 0.35 * (1.0 - u_char);',
-    '  // instrument markings glow softly at night',
-    '  col += vec3(0.5, 1.0, 0.7) * emis * 0.25 * u_nightFactor;',
-    '  col = applyFog(col, v_world);',
-    '  outColor = vec4(finalColor(col), 1.0);',
-    '}'
-  ].join('\n');
+  // The solid shader is generated at init: the airspeed arcs come from the flight model's specs
+  // and the panel frame from PANEL (both must match the geometry / physics exactly).
+  function solidFS() {
+    var S = (RL.FlightModel && RL.FlightModel.specs) || {}, KT = 1.94384;
+    function f(x) { return (+x).toFixed(5); }
+    var vs0 = (S.vStallFlaps || 23) * KT, vs1 = (S.vStall || 27) * KT, vne = (S.vNeverExceed || 108) * KT;
+    var vno = Math.min(vne - 20, (S.vMax || 87) * KT * 0.9), vfe = Math.min(vno, vs0 * 2);
+    return [
+      'in vec3 v_world; in vec3 v_normal; in vec3 v_local; in vec3 v_lnormal; in vec3 v_color;',
+      'flat in int v_mat;',
+      'uniform float u_char;',
+      'uniform float u_inst[12];',                       // cockpit instruments, see instrumentValues()
+      'out vec4 outColor;',
+      'const vec3 CREAM = vec3(0.95, 0.91, 0.82);',
+      'const vec3 RED = vec3(0.84, 0.16, 0.10);',
+      'const vec3 ORANGE = vec3(0.98, 0.50, 0.10);',
+      'const vec3 NAVY = vec3(0.10, 0.14, 0.30);',
+      'const float TAU = 6.2831853;',                   // (PI comes from the shader lib)
+      'const vec3 PANEL_C = vec3(' + f(PANEL.c[0]) + ', ' + f(PANEL.c[1]) + ', ' + f(PANEL.c[2]) + ');',
+      'const vec3 PANEL_U = vec3(0.0, ' + f(PANEL.up[1]) + ', ' + f(PANEL.up[2]) + ');',
+      'const vec3 GAUGE_R = vec3(' + f(GAUGE_R[0]) + ', ' + f(GAUGE_R[1]) + ', ' + f(GAUGE_R[2]) + ');',
+      'const float VS0 = ' + f(vs0) + ', VS1 = ' + f(vs1) + ', VFE = ' + f(vfe) + ', VNO = ' + f(vno) + ', VNE = ' + f(vne) + ';',
+      // anti-aliased step
+      'float aa(float edge, float x) { float w = fwidth(x) * 0.7 + 1e-5; return smoothstep(edge - w, edge + w, x); }',
+      'float band(float x, float a, float b) { return aa(a, x) * (1.0 - aa(b, x)); }',
+      // 3x5 pixel font: R L - 2 6
+      'int glyph(int c) {',
+      '  if (c == 0) return 27565; if (c == 1) return 18727; if (c == 2) return 448;',
+      '  if (c == 3) return 29671; return 14831;',
+      '}',
+      // p: text-space (x in pixel columns, y in rows from the top); chars from `first`, `count` long
+      'float textMask(vec2 p, int first, int count) {',
+      '  if (p.x < 0.0 || p.y < 0.0 || p.y >= 5.0) return 0.0;',
+      '  int ci = int(floor(p.x / 4.0));',
+      '  if (ci >= count) return 0.0;',
+      '  int col = int(floor(mod(p.x, 4.0)));',
+      '  if (col > 2) return 0.0;',
+      '  int row = int(floor(p.y));',
+      '  int bit = 14 - (row * 3 + col);',
+      '  return float((glyph(first + ci) >> bit) & 1);',
+      '}',
+      // sunburst: alternating rays around a focal point, limited to radius r1
+      'float rays(vec2 d, float period, float a0, float a1) {',
+      '  float a = atan(d.x, -d.y);',
+      '  float inside = band(a, a0, a1);',
+      '  float s = fract((a - a0) / period);',
+      '  return inside * (aa(0.08, s) * (1.0 - aa(0.55, s)));',
+      '}',
+      // ---- instrument faces. q = dial coordinates in dial radii (x right, y up); dial angles
+      // are clockwise from 12 o'clock, 0..TAU.
+      'int font(int c) {',                                // 0-9, then N E S W
+      '  if (c == 0) return 31599; if (c == 1) return 11415; if (c == 2) return 29671; if (c == 3) return 29647;',
+      '  if (c == 4) return 23497; if (c == 5) return 31183; if (c == 6) return 31215; if (c == 7) return 29266;',
+      '  if (c == 8) return 31727; if (c == 9) return 31695; if (c == 10) return 24557; if (c == 11) return 31143;',
+      '  if (c == 12) return 14478; return 23549;',
+      '}',
+      'float glyphAt(vec2 p, int c) {',                   // p in font cells, glyph centred, y up
+      '  p += vec2(1.5, 2.5);',
+      '  if (p.x < 0.0 || p.y < 0.0 || p.x >= 3.0 || p.y >= 5.0) return 0.0;',
+      '  int bit = 14 - ((4 - int(p.y)) * 3 + int(p.x));',
+      '  return float((font(c) >> bit) & 1);',
+      '}',
+      'float number(vec2 p, int v) {',
+      '  if (v < 10) return glyphAt(p, v);',
+      '  return max(glyphAt(p + vec2(2.0, 0.0), v / 10), glyphAt(p - vec2(2.0, 0.0), v - (v / 10) * 10));',
+      '}',
+      'float dang(vec2 q) { float a = atan(q.x, q.y); return a < 0.0 ? a + TAU : a; }',
+      'float wrapPi(float a) { return mod(a + PI, TAU) - PI; }',
+      // n scale marks from angle a0, stp apart, from radius r0 to the rim
+      'float ticks(vec2 q, float r, float a0, float stp, float n, float r0, float w) {',
+      '  float rel = mod(dang(q) - a0, TAU);',
+      '  float k = clamp(floor(rel / stp + 0.5), 0.0, n - 1.0);',
+      '  float d = min(abs(rel - k * stp), abs(rel - TAU)) * r;',
+      '  return (1.0 - aa(w, d)) * band(r, r0, 0.9);',
+      '}',
+      // coloured arc clockwise from a0 to a1
+      'float arcBand(vec2 q, float r, float a0, float a1, float r0, float r1) {',
+      '  float h = 0.5 * mod(a1 - a0, TAU);',
+      '  return band(r, r0, r1) * (1.0 - aa(h, abs(wrapPi(dang(q) - a0 - h))));',
+      '}',
+      'float radial(vec2 q, float r, float a, float r0, float w) {',
+      '  return (1.0 - aa(w, abs(wrapPi(dang(q) - a)) * r)) * band(r, r0, 0.9);',
+      '}',
+      'float needle(vec2 q, float A, float len, float w0) {',
+      '  vec2 d = vec2(sin(A), cos(A));',
+      '  float t = clamp(dot(q, d), -0.2, len);',
+      '  float w = mix(w0, w0 * 0.4, clamp((t + 0.2) / (len + 0.2), 0.0, 1.0));',
+      '  return 1.0 - aa(w, length(q - d * t));',
+      '}',
+      // numbers |v0 + k dv| at n angles from a0, stp apart, upright, centred at radius rl
+      'float labels(vec2 q, float a0, float stp, float n, float rl, float cell, int v0, int dv) {',
+      '  float k = floor(mod(dang(q) - a0 + 0.5 * stp, TAU) / stp);',
+      '  if (k > n - 1.0) return 0.0;',
+      '  float a = a0 + k * stp;',
+      '  return number((q - rl * vec2(sin(a), cos(a))) / cell, abs(v0 + int(k) * dv));',
+      '}',
+      'float aKt(float kt) { return clamp(kt, 0.0, 220.0) * (5.93 / 220.0); }',
+      'vec3 dial(int type, vec2 q, out float glow) {',
+      '  float r = length(q), ink = 0.0, ndl = 0.0, lit = 0.0;',
+      '  vec3 c = vec3(0.02, 0.022, 0.026);',
+      '  vec3 RDL = vec3(0.95, 0.15, 0.1), GRN = vec3(0.1, 0.75, 0.22), AMB = vec3(1.0, 0.55, 0.1);',
+      '  if (type == 0) {',                                // airspeed, knots
+      '    c = mix(c, vec3(0.92), arcBand(q, r, aKt(VS0), aKt(VFE), 0.83, 0.9));',
+      '    c = mix(c, GRN, arcBand(q, r, aKt(VS1), aKt(VNO), 0.75, 0.83));',
+      '    c = mix(c, vec3(0.95, 0.8, 0.1), arcBand(q, r, aKt(VNO), aKt(VNE), 0.75, 0.83));',
+      '    c = mix(c, RDL, radial(q, r, aKt(VNE), 0.68, 0.035));',
+      '    ink = max(ticks(q, r, aKt(40.0), aKt(10.0), 19.0, 0.84, 0.018), ticks(q, r, aKt(50.0), aKt(50.0), 4.0, 0.7, 0.035));',
+      '    ink = max(ink, labels(q, aKt(50.0), aKt(50.0), 4.0, 0.5, 0.075, 5, 5));',
+      '    ndl = needle(q, aKt(u_inst[0]), 0.82, 0.065);',
+      '  } else if (type == 1) {',                         // attitude
+      '    float pit = u_inst[1], rol = u_inst[2];',
+      '    vec2 h = vec2(q.x * cos(rol) + q.y * sin(rol), -q.x * sin(rol) + q.y * cos(rol));',  // card frame
+      '    float hy = h.y + pit * 1.6, inner = 1.0 - aa(0.74, r);',
+      '    c = mix(vec3(0.46, 0.28, 0.12), vec3(0.2, 0.5, 0.88), mix(aa(0.0, h.y), aa(0.0, hy), inner));',
+      '    ink = inner * (1.0 - aa(0.02, abs(hy)));',
+      '    ink = max(ink, inner * (1.0 - aa(0.012, abs(abs(hy) - 0.279))) * (1.0 - aa(0.15, abs(h.x))));',
+      '    ink = max(ink, inner * (1.0 - aa(0.012, abs(abs(hy) - 0.558))) * (1.0 - aa(0.26, abs(h.x))));',
+      '    float ca = abs(wrapPi(dang(h)));',                // bank marks on the rotating ring
+      '    float bd = min(min(abs(ca - 0.1745), abs(ca - 0.349)), min(abs(ca - 0.5236), abs(ca - 1.047)));',
+      '    ink = max(ink, (1.0 - aa(0.025, bd * r)) * band(r, 0.8, 0.92));',
+      '    ink = max(ink, (1.0 - aa(0.05, ca * r)) * band(r, 0.76, 0.92));',
+      '    float sym = (1.0 - aa(0.032, abs(q.y))) * band(abs(q.x), 0.17, 0.47);',  // fixed aeroplane
+      '    sym = max(sym, 1.0 - aa(0.05, r));',
+      '    sym = max(sym, band(q.y, 0.6, 0.72) * (1.0 - aa((0.72 - q.y) * 0.55, abs(q.x))));',  // bank pointer
+      '    c = mix(c, vec3(0.95), ink);',
+      '    c = mix(c, AMB, sym);',
+      '    lit = max(max(0.35 * (1.0 - aa(0.92, r)), sym), ink); ink = 0.0;',
+      '  } else if (type == 2) {',                         // altimeter, feet
+      '    ink = max(ticks(q, r, 0.0, TAU / 50.0, 50.0, 0.83, 0.018), ticks(q, r, 0.0, TAU / 10.0, 10.0, 0.7, 0.035));',
+      '    ink = max(ink, labels(q, 0.0, TAU / 10.0, 10.0, 0.56, 0.07, 0, 1));',
+      '    ndl = max(needle(q, fract(u_inst[3] / 1000.0) * TAU, 0.8, 0.055), needle(q, fract(u_inst[3] / 10000.0) * TAU, 0.48, 0.1));',
+      '  } else if (type == 3) {',                         // G meter: 0 g at 9 o\'clock, 30 deg per g
+      '    float stp = PI / 6.0;',
+      '    c = mix(c, RDL, arcBand(q, r, PI + 9.0 * stp, PI + 10.0 * stp, 0.75, 0.9));',
+      '    c = mix(c, RDL, radial(q, r, PI, 0.72, 0.03));',
+      '    ink = max(ticks(q, r, PI, stp, 11.0, 0.72, 0.032), ticks(q, r, PI, stp * 0.5, 21.0, 0.83, 0.018));',
+      '    ink = max(ink, labels(q, 1.5 * PI, 2.0 * stp, 4.0, 0.52, 0.08, 0, 2));',
+      '    ndl = needle(q, 1.5 * PI + clamp(u_inst[4], -3.3, 7.3) * stp, 0.8, 0.065);',
+      '  } else if (type == 4) {',                         // heading: rotating card
+      '    float hd = u_inst[5], c0 = mod(-hd, TAU);',
+      '    ink = max(ticks(q, r, c0, TAU / 72.0, 72.0, 0.85, 0.014), ticks(q, r, c0, TAU / 12.0, 12.0, 0.74, 0.03));',
+      '    float k = floor(mod(dang(q) + hd + 0.25 * PI, TAU) / (0.5 * PI));',
+      '    float phi = k * 0.5 * PI - hd;',
+      '    vec2 d = q - 0.55 * vec2(sin(phi), cos(phi));',
+      '    vec2 lp = vec2(cos(phi) * d.x - sin(phi) * d.y, sin(phi) * d.x + cos(phi) * d.y) / 0.085;',
+      '    float cardinal = glyphAt(lp, 10 + int(k));',
+      '    if (k < 0.5) c = mix(c, RDL, cardinal); else ink = max(ink, cardinal);',   // red N
+      '    float sym = (1.0 - aa(0.035, abs(q.x))) * band(q.y, -0.34, 0.3);',
+      '    sym = max(sym, (1.0 - aa(0.035, abs(q.y - 0.06))) * (1.0 - aa(0.3, abs(q.x))));',
+      '    sym = max(sym, (1.0 - aa(0.03, abs(q.y + 0.27))) * (1.0 - aa(0.13, abs(q.x))));',
+      '    sym = max(sym, band(q.y, 0.86, 0.98) * (1.0 - aa((0.98 - q.y) * 0.6, abs(q.x))));',   // lubber mark
+      '    c = mix(c, vec3(0.93, 0.93, 0.88), ink);',
+      '    c = mix(c, AMB, sym);',
+      '    lit = max(max(sym, ink), cardinal); ink = 0.0;',
+      '  } else if (type == 5) {',                         // vertical speed: +-2000 fpm, 0 at 9 o\'clock
+      '    float sw = 2.967, a0 = 1.5 * PI - sw;',
+      '    ink = max(ticks(q, r, a0, sw / 4.0, 9.0, 0.7, 0.032), ticks(q, r, a0, sw / 20.0, 41.0, 0.83, 0.016));',
+      '    ink = max(ink, labels(q, a0, sw / 2.0, 5.0, 0.53, 0.08, -2, 1));',
+      '    ndl = needle(q, 1.5 * PI + clamp(u_inst[6] / 2000.0, -1.04, 1.04) * sw, 0.8, 0.065);',
+      '  } else if (type == 6) {',                         // rpm: 0 at 7:30 .. 3000 at 4:30
+      '    float a0 = 1.25 * PI, span = 1.5 * PI;',
+      '    c = mix(c, GRN, arcBand(q, r, a0 + span * 0.667, a0 + span * 0.883, 0.75, 0.84));',
+      '    c = mix(c, RDL, radial(q, r, a0 + span * 0.9, 0.68, 0.035));',
+      '    ink = max(ticks(q, r, a0, span / 30.0, 31.0, 0.84, 0.016), ticks(q, r, a0, span / 6.0, 7.0, 0.72, 0.032));',
+      '    ink = max(ink, labels(q, a0, span / 3.0, 4.0, 0.52, 0.08, 0, 1));',
+      '    ndl = needle(q, a0 + clamp(u_inst[7] / 3000.0, 0.0, 1.03) * span, 0.8, 0.065);',
+      '  } else if (type < 10) {',                         // small: oil pressure, fuel, flaps
+      '    float a0 = -PI / 3.0, span = 2.0 * PI / 3.0;',
+      '    float v = type == 7 ? 0.25 + 0.6 * clamp(u_inst[7] / 2700.0, 0.0, 1.0) :',
+      '      (type == 8 ? 0.68 + 0.02 * (u_inst[4] - 1.0) : u_inst[9]);',
+      '    if (type != 9) c = mix(c, GRN, arcBand(q, r, a0 + span * 0.35, a0 + span * 0.85, 0.7, 0.88));',
+      '    if (type == 8) c = mix(c, RDL, arcBand(q, r, a0, a0 + span * 0.12, 0.7, 0.88));',
+      '    ink = type == 9 ? ticks(q, r, a0, span * 0.5, 3.0, 0.55, 0.07) : ticks(q, r, a0, span * 0.25, 5.0, 0.66, 0.05);',
+      '    ndl = needle(q, a0 + clamp(v, 0.0, 1.0) * span, 0.78, 0.1);',
+      '  } else {',                                        // lamps: gear (3 green / red in transit), stall
+      '    float gr = u_inst[8];',
+      '    bool on = type == 10 ? gr > 0.01 : u_inst[10] > 0.55;',
+      '    vec3 lc = type == 10 && gr > 0.99 ? vec3(0.2, 1.0, 0.3) : vec3(1.0, 0.18, 0.08);',
+      '    float dome = 1.0 - aa(0.8, r);',
+      '    glow = on ? dome * 4.0 : 0.0;',
+      '    return mix(vec3(0.05), on ? lc : mix(vec3(0.1), lc, 0.12), dome);',
+      '  }',
+      '  c = mix(c, vec3(0.93, 0.93, 0.88), ink);',
+      '  c = mix(c, vec3(0.97, 0.96, 0.92), ndl);',
+      '  glow = max(max(ink, ndl), lit);',
+      '  return c;',
+      '}',
+      'vec3 livery(int m, vec3 P, vec3 N, vec3 base, out float spec, out float emis) {',
+      '  spec = 0.35; emis = 0.0;',
+      '  vec3 c = base;',
+      '  float ax = abs(P.x);',
+      '  if (m == 1) {',                                   // wings
+      '    c = CREAM;',
+      '    if (N.y > 0.0) {',
+      '      vec2 d = vec2(ax - 0.5, P.z - 0.95);',
+      '      float r = length(d);',
+      '      float ray = rays(d, 0.2, 0.1, 1.5) * (1.0 - aa(2.05, r));',
+      '      c = mix(c, RED, ray);',
+      '      c = mix(c, ORANGE, band(r, 2.05, 2.16) * band(atan(d.x, -d.y), 0.1, 1.5));',
+      // top registration: root -> tip, between the sunburst arc and the orange tip band
+      '      if (P.x > 0.0) c = mix(c, NAVY, textMask(vec2((P.x - 2.52) / 0.072, (P.z + 0.24) / 0.072), 0, 5));',
+      '    } else {',
+      '      float s = fract((ax * 0.8 + P.z * 0.9) / 1.15);',
+      '      c = mix(c, RED, band(s, 0.0, 0.34) * (1.0 - aa(2.2, ax)) * aa(0.6, ax));',
+      // underside (left wing): columns run root -> tip so it reads left to right from below
+      '      if (P.x < 0.0) c = mix(c, NAVY, textMask(vec2((-P.x - 2.3) / 0.08, (P.z + 0.26) / 0.08), 0, 5));',
+      '    }',
+      '    c = mix(c, ORANGE, band(ax, 3.93, 4.0));',
+      '    c = mix(c, RED, aa(4.0, ax));',
+      '  } else if (m == 2) {',                            // fuselage
+      '    c = CREAM;',
+      '    float t = clamp((P.z + 1.9) / 6.0, 0.0, 1.0);',
+      '    float yc = -0.06 + 0.3 * t * t;',
+      '    float hw = mix(0.13, 0.022, t);',
+      '    float side = smoothstep(0.25, 0.45, abs(N.x));',
+      '    c = mix(c, RED, band(P.y - yc, -hw, hw) * side);',
+      '    c = mix(c, ORANGE, band(P.y - yc, hw + 0.03, hw + 0.065) * side);',
+      '    c = mix(c, RED, band(ax, 0.0, 0.07) * step(0.35, P.y) * step(1.45, P.z));',      // spine stripe
+      // anti-glare panel ahead of the windscreen
+      '    c = mix(c, NAVY, (1.0 - aa(0.2 + 0.06 * clamp(-P.z - 0.4, 0.0, 1.0), ax)) * step(0.3, P.y) * band(-P.z, 0.3, 1.9));',
+      '    c = mix(c, vec3(0.78, 0.8, 0.82), smoothstep(-0.55, -0.8, N.y) * step(P.y, -0.2));',
+      '  } else if (m == 3) {',                            // cowling
+      '    c = RED;',
+      '    c = mix(c, ORANGE, aa(3.05, -P.z));',
+      '    c = mix(c, NAVY, band(-P.z, 1.88, 1.98));',
+      '    spec = 0.5;',
+      '  } else if (m == 4) {',                            // tail surfaces
+      '    c = CREAM;',
+      '    if (abs(N.x) > 0.5) {',
+      '      vec2 d = vec2(P.z - 3.0, -(P.y - 0.15));',
+      '      c = mix(c, RED, rays(vec2(d.x, d.y), 0.24, 0.3, 1.45));',
+      '      c = mix(c, RED, aa(1.18, P.y));',
+      '      c = mix(c, ORANGE, band(P.y, 1.1, 1.16));',
+      '      float tz = N.x > 0.0 ? (3.98 - P.z) : (P.z - 3.43);',
+      '      c = mix(c, NAVY, textMask(vec2(tz / 0.075, (0.9 - P.y) / 0.075), 3, 2));',
+      '    } else {',
+      '      c = mix(c, RED, aa(1.2, ax));',
+      '      c = mix(c, ORANGE, band(ax, 1.12, 1.18));',
+      '      c = mix(c, RED, band(P.z, 3.0, 3.3) * step(0.25, ax));',
+      '    }',
+      '  } else if (m == 5) {',                            // spinner swirl
+      '    float a = atan(P.y, P.x) / 6.2831853;',
+      '    float s = fract(a * 2.0 + (-P.z - 3.2) * 2.2);',
+      '    c = mix(CREAM, RED, band(s, 0.0, 0.5));',
+      '    spec = 0.7;',
+      '  } else if (m == 6) {',                            // prop blades
+      '    float r = length(P.xy);',
+      '    c = mix(base, vec3(1.0, 0.8, 0.1), aa(0.76, r));',
+      '    spec = 0.3;',
+      '  } else if (m == 7) {',                            // tyres
+      '    spec = 0.05;',
+      '  } else if (m == 8) {',                            // instrument dial: panel (u, v) + type in the colour
+      '    int type = int(base.z * 32.0 + 0.5);',
+      '    float R = type < 7 ? GAUGE_R.x : (type < 10 ? GAUGE_R.y : GAUGE_R.z);',
+      '    vec2 q = (vec2(P.x, dot(P - PANEL_C, PANEL_U)) - (base.xy - 0.5)) / R;',
+      '    c = dial(type, q, emis);',
+      '    spec = 0.2;',
+      '  } else if (m == 9) {',                            // metal
+      '    spec = 0.8;',
+      '  } else if (m == 10) {',                           // matte cockpit interior
+      '    spec = 0.06;',
+      '  }',
+      '  return c;',
+      '}',
+      'void main() {',
+      '  vec3 N = normalize(v_normal);',
+      '  if (!gl_FrontFacing) N = -N;',
+      '  float spec, emis;',
+      '  vec3 alb = livery(v_mat, v_local, normalize(v_lnormal), v_color, spec, emis);',
+      '  // soot when crashed',
+      '  float soot = u_char * (0.55 + 0.45 * vnoise(v_local.xz * 3.0 + v_local.y * 2.0));',
+      '  alb = mix(alb, vec3(0.05, 0.045, 0.04), clamp(soot, 0.0, 0.92));',
+      '  spec *= 1.0 - u_char * 0.8;',
+      '  vec3 lin = toLinear(alb);',
+      '  float sh = shadowFactor(v_world, N);',
+      '  sh = mix(1.0, sh, 0.85);',
+      '  vec3 col = shadeLit(lin, N, v_world, sh, spec, 48.0);',
+      '  // gentle sky-reflection rim so the paint reads glossy against the sky',
+      '  vec3 V = normalize(u_camPos - v_world);',
+      '  float fr = pow(1.0 - max(dot(N, V), 0.0), 4.0);',
+      '  col += skyColor(reflect(-V, N)) * fr * spec * 0.35 * (1.0 - u_char);',
+      '  // instrument markings and lamps: faintly self-lit by day, backlit at night; a dim warm',
+      '  // flood light keeps the cockpit interior readable in the dark',
+      '  col += lin * emis * (0.12 + 1.1 * u_nightFactor) * (1.0 - u_char);',
+      '  if (v_mat == 8 || v_mat == 10) col += lin * vec3(1.0, 0.72, 0.5) * 0.12 * u_nightFactor;',
+      '  col = applyFog(col, v_world);',
+      '  outColor = vec4(finalColor(col), 1.0);',
+      '}'
+    ].join('\n');
+  }
 
   var GLASS_VS = [
     'layout(location = 0) in vec3 a_position;',
@@ -657,10 +1023,11 @@
 
   var GLASS_FS = [
     'in vec3 v_world; in vec3 v_normal; in vec3 v_local;',
-    'uniform float u_char;',
+    'uniform float u_char; uniform float u_inside;',
     'out vec4 outColor;',
     'void main() {',
     '  vec3 N = normalize(v_normal);',
+    '  if (!gl_FrontFacing) N = -N;',                   // seen from inside (cockpit view)
     '  vec3 V = normalize(u_camPos - v_world);',
     '  float ndv = max(dot(N, V), 0.0);',
     '  float fr = 0.06 + 0.94 * pow(1.0 - ndv, 4.0);',
@@ -674,6 +1041,9 @@
     '  vec3 col = mix(tint, refl, fr) + u_sunColor * sp * (1.0 - u_char);',
     '  col = mix(col, vec3(0.02), u_char * 0.8);',
     '  float alpha = clamp(0.28 + fr * 0.7 + sp * 0.3 + u_char * 0.6, 0.0, 0.96);',
+    // from inside: only a faint grazing-angle sheen and the sun glint, so the bubble reads
+    // without veiling the view
+    '  alpha = mix(alpha, clamp(0.015 + fr * 0.16 + sp * 0.25, 0.0, 0.5), u_inside);',
     '  col = applyFog(col, v_world);',
     '  outColor = vec4(finalColor(col), alpha);',
     '}'
@@ -681,7 +1051,7 @@
 
   var DISC_FS = [
     'in vec3 v_world; in vec3 v_normal; in vec3 v_local;',
-    'uniform float u_rpm; uniform float u_ghost; uniform float u_char;',
+    'uniform float u_rpm; uniform float u_ghost; uniform float u_char; uniform float u_cockpit;',
     'out vec4 outColor;',
     'void main() {',
     '  vec2 q = v_local.xy;',
@@ -691,9 +1061,9 @@
     '  float ghost = pow(abs(cos(a)), 16.0);',                        // two faint ghost blades
     '  float den = 0.18 + 0.25 * ghost;',
     '  den *= smoothstep(0.2, 0.3, r) * (1.0 - smoothstep(0.96, 1.02, r));',
-    '  vec3 base = mix(vec3(0.22), vec3(1.0, 0.8, 0.15), smoothstep(0.84, 0.9, r));',
-    '  float tipRing = smoothstep(0.84, 0.9, r) * (1.0 - smoothstep(0.97, 1.0, r));',
-    '  den += tipRing * 0.25;',
+    '  float tips = smoothstep(0.84, 0.9, r) * (1.0 - u_cockpit);',
+    '  vec3 base = mix(vec3(0.22), vec3(1.0, 0.8, 0.15), tips);',
+    '  den += tips * (1.0 - smoothstep(0.97, 1.0, r)) * 0.25;',
     '  float alpha = den * u_rpm;',
     '  vec3 N = normalize(v_normal);',
     '  vec3 col = toLinear(base) * (hemiAmbient(N) + u_sunColor * 0.35);',
@@ -756,8 +1126,8 @@
   var tmpM = m4.create(), tmpR = m4.create(), tmpV = v3.create();
 
   var Aircraft = {
-    /** Model-space pilot eye point (inside the canopy, just above the glare shield). */
-    cockpitOffset: v3.create(0, 0.88, 0.12)
+    /** Model-space pilot eye point (the cockpit interior and the pilot figure are built around it). */
+    cockpitOffset: v3.create(EYE[0], EYE[1], EYE[2])
   };
 
   function mk(name, geo) {
@@ -769,20 +1139,23 @@
   Aircraft.init = function (glCtx) {
     gl = glCtx;
     var SL = RL.ShaderLib;
-    progSolid = RL.GL.createProgram(gl, SL.vertex(VS), SL.fragment(FS), 'aircraft');
+    progSolid = RL.GL.createProgram(gl, SL.vertex(VS), SL.fragment(solidFS()), 'aircraft');
     progGlass = RL.GL.createProgram(gl, SL.vertex(GLASS_VS), SL.fragment(GLASS_FS), 'aircraft-glass');
     progDisc = RL.GL.createProgram(gl, SL.vertex(GLASS_VS), SL.fragment(DISC_FS), 'aircraft-disc');
     progGlow = RL.GL.createProgram(gl, SL.vertex(GLOW_VS), SL.fragment(GLOW_FS), 'aircraft-glow');
 
-    var body = newGeo();
-    append(body, buildFuselage());
-    append(body, buildWingsFixed());
-    append(body, buildTailFixed());
-    append(body, buildCanopyFrame());
-    append(body, buildLightHousings());
-    mk('body', body);
+    var fus = buildFuselage(), rest = newGeo();
+    append(rest, buildWingsFixed());
+    append(rest, buildTailFixed());
+    append(rest, buildCanopyFrame());
+    append(rest, buildLightHousings());
+    mk('body', append(append(newGeo(), fus), rest));
+    mk('bodyCockpit', append(cutCockpit(fus), rest));     // no skin over the cockpit opening
     mk('pilot', buildPilot());
-    mk('panel', buildPanel());
+    mk('cockpit', buildCockpit());
+    mk('stick', buildStick());
+    mk('throttleBox', buildThrottle());
+    mk('throttle', buildThrottleLever());
     mk('canopy', buildCanopyGlass());
     mk('spinner', buildSpinner());
     mk('prop', buildProp(false));
@@ -806,9 +1179,12 @@
         attribs: [{ loc: 4, size: 4, offset: 0 }, { loc: 5, size: 4, offset: 4 }], count: 0 }
     });
     // shadow caster list (fixed objects, matrices updated in place)
-    ['body', 'flapL', 'flapR', 'ailL', 'ailR', 'elevator', 'rudder', 'canopy', 'spinner', 'prop',
-      'noseLeg', 'noseWheel', 'leftLeg', 'leftWheel', 'rightLeg', 'rightWheel'].forEach(function (k) {
-      casters.push({ mesh: meshes[k], model: mats[k], name: k, gear: /Leg|Wheel/.test(k) });
+    // (cockpit view: the opened body, the interior and no glass, so sunlight falls into the cockpit
+    // and the glare shield shades the panel; outside: the closed body and the canopy silhouette)
+    ['body', 'bodyCockpit', 'cockpit', 'flapL', 'flapR', 'ailL', 'ailR', 'elevator', 'rudder', 'canopy',
+      'spinner', 'prop', 'noseLeg', 'noseWheel', 'leftLeg', 'leftWheel', 'rightLeg', 'rightWheel'].forEach(function (k) {
+      casters.push({ mesh: meshes[k], model: mats[k], name: k, gear: /Leg|Wheel/.test(k),
+        view: k === 'body' || k === 'canopy' ? 'outside' : (k === 'bodyCockpit' || k === 'cockpit' ? 'cockpit' : '') });
     });
     ready = true;
   };
@@ -836,10 +1212,17 @@
     m4.fromRotationTranslation(planeM, plane.quat, plane.pos);
     m4.copy(mats.body, planeM);
     m4.copy(mats.pilot, planeM);
-    m4.copy(mats.panel, planeM);
+    m4.copy(mats.bodyCockpit, planeM);
+    m4.copy(mats.cockpit, planeM);
+    m4.copy(mats.throttleBox, planeM);
     m4.copy(mats.canopy, planeM);
     m4.copy(mats.disc, planeM);
     var sf = plane.surfaces || NO_SURFACES;
+    // stick follows the smoothed elevator / aileron, the lever the applied throttle
+    hinge(tmpM, STICK_PIVOT, AX_X, (sf.elevator || 0) * 0.3);
+    m4.multiply(tmpM, tmpM, hinge(tmpR, STICK_PIVOT, AX_Z, -(sf.aileron || 0) * 0.28));
+    m4.multiply(mats.stick, planeM, tmpM);
+    m4.multiply(mats.throttle, planeM, hinge(tmpM, THROTTLE_PIVOT, AX_X, M.lerp(0.55, -0.5, M.saturate(plane.throttle || 0))));
     var fl = (plane.flaps || 0) * FLAP_MAX;
     m4.multiply(mats.flapL, planeM, hinge(tmpM, parts.flapL.pivot, parts.flapL.axis, fl));
     m4.multiply(mats.flapR, planeM, hinge(tmpM, parts.flapR.pivot, parts.flapR.axis, fl));
@@ -911,11 +1294,15 @@
     G.use(gl, progSolid, null);
     G.applyFrame(gl, progSolid, frame);
     G.setUniform(gl, progSolid, 'u_char', crashed ? 1 : 0);
-    drawPart('body');
+    lastCockpit = !!opts.cockpit;
+    drawPart(opts.cockpit ? 'bodyCockpit' : 'body');
     drawPart('flapL'); drawPart('flapR'); drawPart('ailL'); drawPart('ailR');
     drawPart('elevator'); drawPart('rudder');
     if (!opts.cockpit) drawPart('pilot');
-    else drawPart('panel');
+    else {
+      G.setUniform(gl, progSolid, 'u_inst', instrumentValues(plane));
+      drawPart('cockpit'); drawPart('stick'); drawPart('throttleBox'); drawPart('throttle');
+    }
     // solid blades while they can be seen turning; above that only the blur disc (drawn in the
     // transparent pass) represents them
     drawPart('spinner');
@@ -929,6 +1316,28 @@
     }
   };
 
+  var inst = new Float32Array(12), lastCockpit = false;
+  var KT = 1.94384, FT = 3.28084;
+
+  /** Values for the cockpit gauges (u_inst, read by dial() in the shader). */
+  function instrumentValues(p) {
+    function n(x, d) { return typeof x === 'number' && isFinite(x) ? x : d; }
+    inst[0] = n(p.airspeed, 0) * KT;
+    inst[1] = n(p.pitch, 0) * DEG;
+    inst[2] = n(p.roll, 0) * DEG;
+    inst[3] = Math.max(0, n(p.altitude, 0) * FT);
+    inst[4] = n(p.gForce, 1);
+    inst[5] = n(p.heading, 0) * DEG;
+    inst[6] = n(p.verticalSpeed, 0) * 196.85;           // m/s -> ft/min
+    inst[7] = 150 + 2550 * M.saturate(n(p.rpm, 0));     // idle ~650, full power 2700
+    inst[8] = M.saturate(n(p.gear, 1));
+    inst[9] = M.saturate(n(p.flaps, 0));
+    inst[10] = p.stall ? 1 : n(p.stallWarning, 0);
+    inst[11] = 0;
+    if (p.crashed) { inst[0] = 0; inst[6] = 0; inst[7] = 0; }
+    return inst;
+  }
+
   Aircraft.drawLights = function (frame, plane, opts) {
     if (!ready || !plane || !plane.quat || (opts && opts.hidden)) return;
     opts = opts || {};
@@ -939,25 +1348,26 @@
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.depthMask(false);
 
-    // canopy glass (from inside it is back-facing and culled: the cockpit view stays clear)
-    G.use(gl, progGlass, null);
-    G.applyFrame(gl, progGlass, frame);
-    G.setUniform(gl, progGlass, 'u_model', planeM);
-    G.setUniform(gl, progGlass, 'u_char', crashed ? 1 : 0);
-    G.drawMesh(gl, meshes.canopy);
+    // back to front: from outside the canopy is nearer than the prop disc only when seen from
+    // behind, from the cockpit the disc is always beyond the glass
+    if (!opts.cockpit) drawCanopy(frame, crashed, false);
 
-    // propeller blur disc
+    // propeller blur disc (fainter and without the yellow tip ring from the cockpit, where it
+    // would read as a gunsight ring around the view centre)
     var rpmVis = crashed ? 0 : M.smoothstep(0.3, PROP_SOLID_RPM + 0.05, plane.rpm);
     if (rpmVis > 0.01) {
       gl.disable(gl.CULL_FACE);
       G.use(gl, progDisc, null);
       G.applyFrame(gl, progDisc, frame);
       G.setUniform(gl, progDisc, 'u_model', planeM);
-      G.setUniform(gl, progDisc, 'u_rpm', rpmVis * (opts.cockpit ? 0.55 : 1));
+      G.setUniform(gl, progDisc, 'u_rpm', rpmVis * (opts.cockpit ? 0.8 : 1));
+      G.setUniform(gl, progDisc, 'u_cockpit', opts.cockpit ? 1 : 0);
       G.setUniform(gl, progDisc, 'u_ghost', (frame.time || 0) * (1.3 - plane.rpm) * 2.0);
       G.drawMesh(gl, meshes.disc);
       gl.enable(gl.CULL_FACE);
     }
+    // from inside only the inner (back) faces of the bubble: a faint sheen and the sun glint
+    if (opts.cockpit) drawCanopy(frame, crashed, true);
 
     // additive glow sprites
     var n = fillGlow(frame, plane, crashed, opts);
@@ -972,6 +1382,18 @@
     gl.disable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
   };
+
+  function drawCanopy(frame, crashed, inside) {
+    var G = RL.GL;
+    G.use(gl, progGlass, null);
+    G.applyFrame(gl, progGlass, frame);
+    G.setUniform(gl, progGlass, 'u_model', planeM);
+    G.setUniform(gl, progGlass, 'u_char', crashed ? 1 : 0);
+    G.setUniform(gl, progGlass, 'u_inside', inside ? 1 : 0);
+    if (inside) gl.cullFace(gl.FRONT);
+    G.drawMesh(gl, meshes.canopy);
+    if (inside) gl.cullFace(gl.BACK);
+  }
 
   var LIGHTS = {
     left: [-(WING.tipX + 0.1), 0.03, 0.0], right: [WING.tipX + 0.1, 0.03, 0.0],
@@ -1031,6 +1453,8 @@
       var c = casters[i];
       if (g < 0.02 && c.gear) continue;
       if (c.name === 'prop' && plane.rpm >= PROP_SOLID_RPM && !plane.crashed) continue;
+      // the view flag is last frame's (the shadow pass runs before draw)
+      if (c.view && (c.view === 'cockpit') !== lastCockpit) continue;
       out.push(c);
     }
     return out;

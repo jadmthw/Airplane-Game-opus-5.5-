@@ -6,7 +6,8 @@
  * depth-tinted colour and alpha, a soft shoreline and animated foam. Waves are a sum of wind-aligned
  * directional swells plus drifting noise ripples (faded by pixel footprint so they never alias);
  * fresnel mixes in a reflection found by ray-marching the reflected ray over the heightfield
- * (mirrored hills and peaks, skyColor() above them) and a sun / moon glint.
+ * (mirrored hills and peaks, skyColor() above them) and a sun / moon glint. The march is skipped
+ * where fresnel makes the reflection negligible; quality=low also drops the finest ripple octave.
  */
 (function (RL) {
   'use strict';
@@ -21,6 +22,11 @@
     '  gl_Position = u_viewProj * vec4(a_position, 1.0);',
     '}'
   ].join('\n');
+
+  // Quality switch, prepended to FS. (The reflection march keeps its 22 steps on low: with fewer,
+  // longer steps whole ridges drop out of the mirrored image.)
+  var FS_HIGH = 'const bool FINE_RIPPLES = true;';
+  var FS_LOW = 'const bool FINE_RIPPLES = false;';
 
   var FS = [
     'in vec3 v_pos;',
@@ -38,22 +44,48 @@
     '// would be narrower than a few pixels, which otherwise alias into moire rings far away.',
     'float aa(float k, float fp) { return 1.0 - smoothstep(0.3, 1.0, k * fp); }',
     '',
+    '// Mirrored terrain at ground point p: albedo by height (grass, rock, snow), lit like the real',
+    '// terrain, fogged along the reflected path. The slope normal comes from two extra taps a cell',
+    '// and a half apart: the R16F heights are quantised to ~1 m up high, so closer taps give',
+    '// striped, noisy shading on the reflected peaks.',
+    'vec3 reflTerrain(vec2 p) {',
+    '  float e = u_hmap.y * 1.5;',
+    '  float h = terrainH(p);',
+    '  vec3 Nt = normalize(vec3(h - terrainH(p + vec2(e, 0.0)), e, h - terrainH(p + vec2(0.0, e))));',
+    '  vec3 alb = mix(vec3(0.27, 0.40, 0.19), vec3(0.45, 0.41, 0.36), smoothstep(200.0, 650.0, h));',
+    '  alb = mix(alb, vec3(0.92, 0.94, 0.98), smoothstep(1150.0, 1300.0, h));',
+    '  vec3 c = toLinear(alb) * (hemiAmbient(Nt) + u_sunColor * max(dot(Nt, u_sunDir), 0.0));',
+    '  return applyFog(c, vec3(p.x, h, p.y));',
+    '}',
+    '',
     '// Reflected view: march the reflected ray over the heightfield so the surrounding hills and',
-    '// peaks appear mirrored in the lake; the sky where nothing is hit.',
-    'vec3 reflection(vec3 ro, vec3 rd) {',
-    '  float t = 6.0;',
+    '// peaks appear mirrored in the lake; the sky where nothing is hit. A hit is refined between',
+    '// the last two samples. A near miss still blends in the ground it passed closest to, by the',
+    '// angle it cleared it by (soft, from the wave roughness): rippled water blurs the mirror image,',
+    '// and a binary hit / miss test turns every ripple into a hard-edged dark slick.',
+    'vec3 reflection(vec3 ro, vec3 rd, float soft) {',
+    '  float t = 6.0, tPrev = 0.0, best = -1.0, tBest = 0.0;',
     '  for (int i = 0; i < 22; i++) {',
     '    vec3 p = ro + rd * t;',
-    '    float h = terrainH(p.xz);',
-    '    if (h > p.y) {',
-    '      vec3 alb = mix(vec3(0.27, 0.40, 0.19), vec3(0.45, 0.41, 0.36), smoothstep(200.0, 650.0, h));',
-    '      alb = mix(alb, vec3(0.92, 0.94, 0.98), smoothstep(1150.0, 1300.0, h));',
-    '      vec3 c = toLinear(alb) * (hemiAmbient(vec3(0.0, 1.0, 0.0)) + u_sunColor * max(u_sunDir.y, 0.0) * 0.55);',
-    '      return applyFog(c, p);',
+    '    float d = p.y - terrainH(p.xz);',
+    '    if (d < 0.0) {',
+    '      // refine the crossing: a few bisection steps between the last two samples',
+    '      float a = tPrev, b = t;',
+    '      for (int k = 0; k < 4; k++) {',
+    '        float c = 0.5 * (a + b);',
+    '        vec3 q = ro + rd * c;',
+    '        if (q.y < terrainH(q.xz)) b = c; else a = c;',
+    '      }',
+    '      return reflTerrain((ro + rd * b).xz);',
     '    }',
+    '    float m = -d / t;          // angle by which the ray clears the ground here (negative)',
+    '    if (m > best) { best = m; tBest = t; }',
+    '    tPrev = t;',
     '    t *= 1.38;',
     '  }',
-    '  return skyColor(rd);',
+    '  vec3 sky = skyColor(rd);',
+    '  if (best <= -soft) return sky;',
+    '  return mix(sky, reflTerrain((ro + rd * tBest).xz), smoothstep(-soft, 0.0, best));',
     '}',
     '',
     '// Slope (d height / d xz) of the animated surface.',
@@ -74,9 +106,12 @@
     '  vec2 q = p * 0.35 - w * t * 0.6;',
     '  float n0 = vnoise(q), nx = vnoise(q + vec2(e, 0.0)), nz = vnoise(q + vec2(0.0, e));',
     '  s += vec2(nx - n0, nz - n0) / e * 0.05 * aa(2.2, fp);',
-    '  vec2 q2 = p * 1.3 + w.yx * t * 0.9;',
-    '  float m0 = vnoise(q2), mx = vnoise(q2 + vec2(e, 0.0)), mz = vnoise(q2 + vec2(0.0, e));',
-    '  s += vec2(mx - m0, mz - m0) / e * 0.022 * aa(8.0, fp);',
+    '  float fine = aa(8.0, fp);',
+    '  if (FINE_RIPPLES && fine > 0.0) {',
+    '    vec2 q2 = p * 1.3 + w.yx * t * 0.9;',
+    '    float m0 = vnoise(q2), mx = vnoise(q2 + vec2(e, 0.0)), mz = vnoise(q2 + vec2(0.0, e));',
+    '    s += vec2(mx - m0, mz - m0) / e * 0.022 * fine;',
+    '  }',
     '  // gusts roughen patches of the lake',
     '  float gust = 0.6 + 0.8 * vnoise(p * 0.004 - w * t * 0.02);',
     '  return s * gust;',
@@ -100,7 +135,15 @@
     '  vec3 R = reflect(-V, N);',
     '  R.y = abs(R.y);',
     '  R.y = max(R.y, 0.004);',
-    '  vec3 refl = reflection(v_pos + vec3(0.0, 0.5, 0.0), normalize(R));',
+    '  // The mirror image uses calmer waves at grazing angles: full wave slopes swing the nearly',
+    '  // horizontal reflected ray between the far bank and the sky from pixel to pixel.',
+    '  float calm = mix(0.3, 1.0, smoothstep(0.05, 0.5, V.y));',
+    '  vec3 Rm = reflect(-V, normalize(vec3(-sl.x * calm, 1.0, -sl.y * calm)));',
+    '  Rm.y = max(abs(Rm.y), 0.004);',
+    '  Rm = normalize(Rm);',
+    '  float soft = 0.02 + 0.6 * length(sl) * calm;',
+    '  // below ~2.5 % fresnel the mirrored terrain cannot show: skip the march',
+    '  vec3 refl = fres < 0.025 ? skyColor(Rm) : reflection(v_pos + vec3(0.0, 0.5, 0.0), Rm, soft);',
     '',
     '  // water body: shallow turquoise -> deep blue-green, lit by sun + sky',
     '  float dk = 1.0 - exp(-max(depth, 0.0) * 0.16);',
@@ -162,7 +205,8 @@
       if (!gl) return;
       glc = gl;
       var SL = RL.ShaderLib;
-      prog = RL.GL.createProgram(gl, SL.vertex(VS), SL.fragment(FS), 'water');
+      var low = RL.Params && RL.Params.quality === 'low';
+      prog = RL.GL.createProgram(gl, SL.vertex(VS), SL.fragment((low ? FS_LOW : FS_HIGH) + '\n' + FS), 'water');
       var lvl = C.water.level;
       meshes = [];
       for (var i = 0; i < C.water.lakes.length; i++) {

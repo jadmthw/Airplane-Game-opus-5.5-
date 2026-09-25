@@ -28,6 +28,7 @@
 
   // ------------------------------------------------------------------ scratch
   var tmpA = v3.create(), tmpB = v3.create(), tmpC = v3.create(), tmpD = v3.create();
+  var camU0 = v3.create(), camS = v3.create();
   var pForward = v3.create(0, 0, -1), pUp = v3.create(0, 1, 0), pRight = v3.create(1, 0, 0);
   var pPos = v3.create(), pVel = v3.create();
   var fallbackQuat = quat.create();
@@ -202,14 +203,26 @@
     v3.transformQuat(tmpA, tmpA, chaseQ);
     v3.add(tmpB, pPos, tmpA);   // eye
 
-    // up: partially follows the bank; fully when steep/inverted so loops never flip
+    // up: the camera rolls by a steady fraction of the bank (about half in normal turns),
+    // reaching the full bank when inverted, so the horizon tilt grows smoothly with bank and a
+    // steeper turn always looks steeper. The bank is measured about the chase forward axis from
+    // the world-up direction; near vertical (where that is undefined) the camera takes the
+    // aircraft's up, so loops never flip.
     v3.transformQuat(tmpC, AX_UP, chaseQ);
-    var w = M.lerp(1, 0.38, M.smoothstep(0.0, 0.6, tmpC[1]));
-    v3.lerp(tmpC, WORLD_UP, tmpC, w);
+    v3.transformQuat(tmpD, AX_FWD, chaseQ);
+    var fy = M.clamp(tmpD[1], -1, 1);
+    var hz = Math.sqrt(Math.max(1e-6, 1 - fy * fy));
+    v3.set(camU0, -fy * tmpD[0] / hz, (1 - fy * fy) / hz, -fy * tmpD[2] / hz);   // level "up"
+    v3.cross(camS, tmpD, camU0);                                                 // level "right"
+    var bank = Math.atan2(v3.dot(tmpC, camS), v3.dot(tmpC, camU0));
+    var camRoll = bank * M.lerp(0.45, 1, M.smoothstep(30 * M.DEG, Math.PI, Math.abs(bank)));
+    var cr = Math.cos(camRoll), sr = Math.sin(camRoll);
+    v3.set(camS, camU0[0] * cr + camS[0] * sr, camU0[1] * cr + camS[1] * sr, camU0[2] * cr + camS[2] * sr);
+    v3.lerp(tmpC, camS, tmpC, M.smoothstep(0.75, 0.95, Math.abs(fy)));
     v3.normalize(tmpC, tmpC);
 
-    // look a little ahead of the aircraft so it sits below center with room to see where it goes
-    v3.transformQuat(tmpD, AX_FWD, chaseQ);
+    // look a little ahead of the aircraft (along tmpD, the chase forward) so it sits below
+    // center with room to see where it goes
     var ahead = (onGround ? 5 : 7) + Math.min(speed, 90) * 0.06;
     v3.scaleAndAdd(lookTarget, pPos, tmpD, ahead * (1 - Math.min(1, Math.abs(ly) * 0.8)));
     v3.scaleAndAdd(lookTarget, lookTarget, tmpC, 1.1);
@@ -367,9 +380,12 @@
   function poseCrashed(dt) {
     crashAngle += dt * 0.12;
     v3.damp(crashCenter, crashCenter, pPos, 2, dt);   // follow the wreck as it settles
-    var r = 38;
-    v3.set(tmpB, crashCenter[0] + Math.sin(crashAngle) * r, crashCenter[1] + 15, crashCenter[2] + Math.cos(crashAngle) * r);
-    v3.set(lookTarget, crashCenter[0], crashCenter[1] + 2, crashCenter[2]);
+    // Far enough back that the fireball stays compact, and aimed a little below the wreck so it
+    // sits just above the middle of the frame, clear of the crash panel at the bottom of the
+    // screen, with the valley and mountains still behind it.
+    var r = 48;
+    v3.set(tmpB, crashCenter[0] + Math.sin(crashAngle) * r, crashCenter[1] + 14, crashCenter[2] + Math.cos(crashAngle) * r);
+    v3.set(lookTarget, crashCenter[0], crashCenter[1] - 3, crashCenter[2]);
     setWantLookAt(tmpB, lookTarget, WORLD_UP);
     want.fov = baseFov() - 4 * M.DEG;
     want.near = cfgRender().near;

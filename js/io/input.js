@@ -14,7 +14,9 @@
  * leave it and drifts gently back to center once the mouse is idle (settings.stickReturn), so
  * holding a turn needs only small corrections. An expo curve gives fine control near center.
  * Keys ramp smoothly and take over their axis while held (the mouse stick on that axis is
- * zeroed so releasing a key never snaps back to a stale mouse position).
+ * zeroed so releasing a key never snaps back to a stale mouse position). A pitch key starts as a
+ * moderate input and only grows to full deflection when held on, so holding it gives a partial
+ * pull (flare, steady climb) while a long hold still loops; [ / ] add a persistent pitch trim.
  */
 (function (RL) {
   'use strict';
@@ -27,6 +29,13 @@
   var LOOK_RAD_PER_PX = 0.0042;
   var LOOK_MAX_YAW = 2.7, LOOK_MAX_PITCH = 1.25;
   var FALLBACK_DEADZONE = 0.06;
+  var FALLBACK_ARM_RADIUS = 0.15;  // no-lock mode: cursor must come this close to center to fly
+  var LOCK_COOLDOWN = 2.0;         // s after losing the lock during which a refusal may be temporary
+  // keyboard axes: attack rates (per s) — roll is slower so an ordinary press is a normal bank
+  var KEY_ATTACK = 3.6, KEY_ROLL_ATTACK = 2.2;
+  var PITCH_KEY_SOFT = 0.45;                          // pitch key level for the first moments
+  var PITCH_KEY_GROW0 = 1.0, PITCH_KEY_GROW1 = 2.5;   // held this long (s) it grows to full
+  var TRIM_STEP = 0.04, TRIM_MAX = 0.4;
 
   // key code -> discrete action (queued once per physical press)
   var ACTION_KEYS = {
@@ -34,8 +43,11 @@
     KeyP: 'pause', Escape: 'pause',
     KeyR: 'reset', KeyF: 'flaps', KeyG: 'gear', KeyC: 'camera', KeyT: 'smokeColor',
     KeyN: 'timeOfDay', KeyH: 'help', F1: 'help', KeyM: 'mute', KeyU: 'hud',
-    KeyX: 'centerStick', KeyI: 'invertPitch', KeyV: 'mouseFlight'
+    KeyX: 'centerStick', KeyI: 'invertPitch', KeyV: 'mouseFlight',
+    BracketLeft: 'trimDown', BracketRight: 'trimUp'
   };
+  // handled inside Input, never queued for main.js
+  var INTERNAL_ACTIONS = { centerStick: 1, invertPitch: 1, mouseFlight: 1, trimDown: 1, trimUp: 1 };
   // keys held for continuous controls
   var HOLD_KEYS = {
     ArrowUp: 1, ArrowDown: 1, ArrowLeft: 1, ArrowRight: 1, KeyQ: 1, KeyE: 1, KeyA: 1, KeyD: 1,
@@ -57,12 +69,15 @@
   var mouseX = -1, mouseY = -1;      // last client position (fallback mode)
   var lockSupported = false;
   var lockClickFailures = 0, lockRequestFromClick = false, lastLockRequestAt = -10;
+  var lastUnlockAt = -1e9;           // wall-clock s when the pointer lock was last lost
+  var fallbackArmed = false, fallbackHintAt = -1;
   var prevState = null;
 
   // stick (raw virtual stick, unit disc) and smoothed key axes
   var raw = { x: 0, y: 0 };
   var keyAxis = { pitch: 0, roll: 0, yaw: 0 };
   var keyWeight = { pitch: 0, roll: 0 };
+  var pitchHold = 0, pitchHoldDir = 0;   // how long (s) a pitch key has been held, and which way
 
   var Input = {
     controls: { pitch: 0, roll: 0, yaw: 0, throttle: 0, brake: 0, smoke: false },
@@ -70,7 +85,9 @@
     look: { yaw: 0, pitch: 0, active: false, dYaw: 0, dPitch: 0 },
     pointerLocked: false,
     pointerFallback: false,
+    fallbackArmed: false,           // no-lock mode: false until the cursor has been re-centred
     mouseFlight: true,
+    trim: 0,                        // persistent pitch trim added to controls.pitch (-0.4..0.4)
     throttleTarget: 0,
     settings: { invertPitch: false, sensitivity: 1.0, stickReturn: 0.7 },
 
@@ -87,9 +104,13 @@
   // ------------------------------------------------------------------ helpers
   function gameState() { return (RL.Game && RL.Game.state) || 'title'; }
   function fin(x, d) { return (typeof x === 'number' && isFinite(x)) ? x : d; }
+  // Wall-clock seconds: lock cool-downs run in real time even when the frame rate is poor.
+  function wallNow() {
+    return ((window.performance && performance.now) ? performance.now() : Date.now()) / 1000;
+  }
 
-  function toast(text, kind) {
-    if (RL.Events) RL.Events.emit('message', { text: text, kind: kind || 'info', duration: 1.6 });
+  function toast(text, kind, duration) {
+    if (RL.Events) RL.Events.emit('message', { text: text, kind: kind || 'info', duration: duration || 1.6 });
   }
 
   function queueAction(name) {
@@ -169,14 +190,28 @@
   function centerStick() {
     raw.x = 0; raw.y = 0;
     accDX = 0; accDY = 0;
+    Input.trim = 0;
+  }
+
+  function setTrim(v) {
+    Input.trim = Math.round(M.clamp(fin(v, 0), -TRIM_MAX, TRIM_MAX) / TRIM_STEP) * TRIM_STEP;
+    var pct = Math.round(Input.trim * 100);
+    toast(pct === 0 ? 'Pitch trim neutral' : 'Pitch trim ' + Math.abs(pct) + '% nose ' + (pct > 0 ? 'up' : 'down'));
   }
 
   function lockElement() {
     return document.pointerLockElement || document.mozPointerLockElement || null;
   }
 
-  function requestPointerLock() {
+  /**
+   * fromGesture: true when called from a click/key handler, false for automatic retries. Left
+   * out, the browser's user-activation state decides, so UI buttons calling requestPointerLock()
+   * still count their refusals (which is what switches to the no-lock fallback).
+   */
+  function requestPointerLock(fromGesture) {
     if (!canvas || !lockSupported || lockElement() === canvas) return;
+    var ua = navigator.userActivation;
+    lockRequestFromClick = fromGesture === true || (fromGesture === undefined && !!(ua && ua.isActive));
     lastLockRequestAt = now;
     try {
       var r = (canvas.requestPointerLock || canvas.mozRequestPointerLock).call(canvas);
@@ -194,7 +229,9 @@
   function handleInternal(name) {
     if (name === 'centerStick') {
       centerStick();
-      toast('Stick centered');
+      toast('Stick and trim centered');
+    } else if (name === 'trimUp' || name === 'trimDown') {
+      if (gameState() === 'playing') setTrim(Input.trim + (name === 'trimUp' ? TRIM_STEP : -TRIM_STEP));
     } else if (name === 'invertPitch') {
       Input.settings.invertPitch = !Input.settings.invertPitch;
       saveSettings();
@@ -204,7 +241,7 @@
       centerStick();
       saveSettings();
       if (Input.mouseFlight) {
-        if (gameState() === 'playing') { lockRequestFromClick = true; requestPointerLock(); }
+        if (gameState() === 'playing') requestPointerLock(true);
         toast('Mouse flight on');
       } else {
         exitPointerLock();
@@ -224,14 +261,13 @@
     if (e.repeat || keys[code]) return;               // key repeat never re-triggers
     keys[code] = true;
     if (!action) return;
-    if (action === 'centerStick' || action === 'invertPitch' || action === 'mouseFlight') {
+    if (INTERNAL_ACTIONS[action]) {
       handleInternal(action);
       return;
     }
     if (action === 'start' && lockSupported && Input.mouseFlight && gameState() !== 'playing') {
       // Enter is a user gesture: grab the mouse now so flight can begin immediately.
-      lockRequestFromClick = true;
-      requestPointerLock();
+      requestPointerLock(true);
     }
     queueAction(action);
   }
@@ -247,6 +283,9 @@
   function onMouseDown(e) {
     gesture();
     var onCanvas = e.target === canvas || Input.pointerLocked;
+    // A click on a menu leaves the cursor wherever that button was: in no-lock mode that spot
+    // must not become a stick deflection, so wait for the cursor to come back to center.
+    if (!onCanvas) fallbackArmed = false;
     if (e.button === 1) {
       if (onCanvas) { e.preventDefault(); centerStick(); }
       btn.middle = true;
@@ -261,11 +300,10 @@
     var st = gameState();
     if (st === 'title') {
       queueAction('start');
-      if (Input.mouseFlight) { smokeFromLock = true; lockRequestFromClick = true; requestPointerLock(); }
+      if (Input.mouseFlight) { smokeFromLock = true; requestPointerLock(true); }
     } else if (st === 'playing' && Input.mouseFlight && lockSupported && !Input.pointerLocked) {
       smokeFromLock = true;
-      lockRequestFromClick = true;
-      requestPointerLock();
+      requestPointerLock(true);
     }
   }
 
@@ -307,16 +345,24 @@
       accDX = 0; accDY = 0;
     } else if (was) {
       // Browsers swallow Esc while locked: losing the lock mid-flight means "pause".
+      lastUnlockAt = wallNow();
       btn.left = btn.right = btn.middle = false;
       if (gameState() === 'playing') queueAction('pause');
     }
   }
 
   function onLockError() {
-    if (lockRequestFromClick) {
+    // (a duplicate request refused after another one already got the lock is no failure)
+    if (lockRequestFromClick && lockElement() !== canvas) {
       lockClickFailures++;
-      // One failure can be the browser's cool-down after Esc; two means it really won't lock.
-      if (lockClickFailures >= 2) Input.pointerFallback = true;
+      // A refusal right after losing the lock can be the browser's cool-down after Esc, so then
+      // it takes two; otherwise one refusal of a real click means it won't lock (e.g. sandboxed
+      // iframe) and the cursor-offset fallback takes over at once.
+      var coolingDown = wallNow() - lastUnlockAt < LOCK_COOLDOWN;
+      if (lockClickFailures >= 2 || !coolingDown) {
+        if (!Input.pointerFallback) { fallbackArmed = false; fallbackHintAt = now + 0.8; }
+        Input.pointerFallback = true;
+      }
     }
     lockRequestFromClick = false;
   }
@@ -347,17 +393,19 @@
     document.addEventListener('mozpointerlockchange', onLockChange, false);
     document.addEventListener('pointerlockerror', onLockError, false);
     document.addEventListener('mozpointerlockerror', onLockError, false);
+    // a fresh flight starts untrimmed (R respawns without leaving the 'playing' state)
+    if (RL.Events) RL.Events.on('respawn', function () { Input.trim = 0; });
     // touch taps still count as a gesture (audio unlock) even though flight needs a mouse
     window.addEventListener('touchstart', gesture, { passive: true });
   }
 
   // ------------------------------------------------------------------ per-frame update
   // Smooth key ramp: quick attack, quicker release, instant-ish reversal.
-  function rampAxis(cur, target, dt) {
+  function rampAxis(cur, target, dt, attack) {
     var rate;
     if (target === 0) rate = 6.5;
     else if (cur * target < 0) rate = 9;
-    else rate = 3.6;
+    else rate = attack;
     return M.approach(cur, target, rate * dt);
   }
 
@@ -383,10 +431,11 @@
       if (st !== 'playing' && Input.pointerLocked) exitPointerLock();
       if (st === 'playing' && prevState !== null && Input.mouseFlight && !Input.pointerLocked &&
           now - lastLockRequestAt > 0.5) {   // (a click/Enter may already have asked)
-        lockRequestFromClick = false;
-        requestPointerLock();
+        requestPointerLock(false);
       }
       if (st === 'playing' && prevState === 'title') centerStick();
+      if (st === 'title' || st === 'crashed') Input.trim = 0;
+      if (st === 'playing') { fallbackArmed = false; fallbackHintAt = now + 0.8; }
       prevState = st;
     }
 
@@ -431,7 +480,14 @@
       var R = 0.42 * Math.min(w, h);
       var fx = (mouseX - w * 0.5) / R, fy = (mouseY - h * 0.5) / R * pitchSign;
       var l = Math.sqrt(fx * fx + fy * fy);
-      var t = l <= FALLBACK_DEADZONE ? 0 : Math.min(1, (l - FALLBACK_DEADZONE) / (1 - FALLBACK_DEADZONE));
+      // Start (or resume) with a neutral stick until the cursor visits the center, so the spot
+      // where a menu button sat is not applied as a sudden deflection.
+      if (!fallbackArmed && l <= FALLBACK_ARM_RADIUS) fallbackArmed = true;
+      if (!fallbackArmed && fallbackHintAt >= 0 && now > fallbackHintAt) {
+        fallbackHintAt = -1;
+        toast('Move the mouse to the middle of the screen to take control', 'info', 3.5);
+      }
+      var t = (!fallbackArmed || l <= FALLBACK_DEADZONE) ? 0 : Math.min(1, (l - FALLBACK_DEADZONE) / (1 - FALLBACK_DEADZONE));
       var tx = l > 1e-6 ? fx / l * t : 0, ty = l > 1e-6 ? fy / l * t : 0;
       raw.x = M.damp(raw.x, tx, 25, dt);
       raw.y = M.damp(raw.y, ty, 25, dt);
@@ -445,9 +501,13 @@
     var tp = keyTarget('ArrowUp', null, 'ArrowDown', null);          // ↓ = nose up
     var tr = keyTarget('ArrowLeft', 'KeyQ', 'ArrowRight', 'KeyE');
     var ty2 = keyTarget('KeyA', null, 'KeyD', null);
-    keyAxis.pitch = rampAxis(keyAxis.pitch, tp, dt);
-    keyAxis.roll = rampAxis(keyAxis.roll, tr, dt);
-    keyAxis.yaw = rampAxis(keyAxis.yaw, ty2, dt);
+    // a pitch key grows from a moderate to a full input the longer it is held
+    if (tp !== 0 && tp === pitchHoldDir) pitchHold += dt; else pitchHold = 0;
+    pitchHoldDir = tp;
+    var tpMag = PITCH_KEY_SOFT + (1 - PITCH_KEY_SOFT) * M.smoothstep(PITCH_KEY_GROW0, PITCH_KEY_GROW1, pitchHold);
+    keyAxis.pitch = rampAxis(keyAxis.pitch, tp * tpMag, dt, KEY_ATTACK);
+    keyAxis.roll = rampAxis(keyAxis.roll, tr, dt, KEY_ROLL_ATTACK);
+    keyAxis.yaw = rampAxis(keyAxis.yaw, ty2, dt, KEY_ATTACK);
     if (tp !== 0) raw.y = 0;
     if (tr !== 0) raw.x = 0;
     keyWeight.pitch = M.approach(keyWeight.pitch, (tp !== 0 || keyAxis.pitch !== 0) ? 1 : 0, 8 * dt);
@@ -467,21 +527,23 @@
       yaw = M.clamp(yaw + mouseRoll * (1 - M.smoothstep(12, 32, gs)), -1, 1);
     }
 
-    c.pitch = M.clamp(fin(pitch, 0), -1, 1);
+    c.pitch = M.clamp(fin(pitch + Input.trim, 0), -1, 1);
     c.roll = M.clamp(fin(roll, 0), -1, 1);
     c.yaw = M.clamp(fin(yaw, 0), -1, 1);
 
     // HUD stick: the mouse stick where the mouse is in charge, the key value where keys are.
     Input.stick.x = M.lerp(raw.x, keyAxis.roll, keyWeight.roll);
-    Input.stick.y = M.lerp(raw.y, keyAxis.pitch, keyWeight.pitch);
+    Input.stick.y = M.clamp(M.lerp(raw.y, keyAxis.pitch, keyWeight.pitch) + Input.trim, -1, 1);
+    Input.fallbackArmed = fallbackArmed;
 
-    // ---- throttle: W/S ramp, wheel steps, output eased so the lever never jumps
-    if (keys.KeyW) Input.throttleTarget += 0.55 * dt;
-    if (keys.KeyS) Input.throttleTarget -= 0.55 * dt;
-    if (wheelAcc !== 0) {
+    // ---- throttle: W/S ramp, wheel steps, output eased so the lever never jumps. Only live in
+    // flight: moving it while paused (or scrolling over a menu) would jump the engine on resume.
+    if (flying) {
+      if (keys.KeyW) Input.throttleTarget += 0.55 * dt;
+      if (keys.KeyS) Input.throttleTarget -= 0.55 * dt;
       Input.throttleTarget -= wheelAcc * 0.0005;   // one 100px notch = 5 %
-      wheelAcc = 0;
     }
+    wheelAcc = 0;
     Input.throttleTarget = M.clamp(fin(Input.throttleTarget, 0), 0, 1);
     c.throttle = M.approach(fin(c.throttle, 0), Input.throttleTarget, 2.5 * dt);
 

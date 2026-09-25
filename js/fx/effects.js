@@ -483,13 +483,15 @@
     var rpm = plane.rpm !== undefined ? plane.rpm : plane.throttle || 0;
     var speed = v3.length(vel);
 
-    // ---- exhaust: short grey wisps from both stacks, denser at high power
+    // ---- exhaust: short grey wisps from both stacks, denser at high power. Clearly visible at
+    // run-up and taxi; thinned in flight so the chase view does not show a constant white plume
+    // that reads like the skywriting smoke is on.
     if (rpm > 0.05) {
       acc.exhaust += dt * (8 + 38 * rpm);
       var nEx = Math.floor(acc.exhaust);
       acc.exhaust -= nEx;
       clearOpts(optsA);
-      optsA.alpha = 0.16 + 0.24 * rpm;
+      optsA.alpha = (0.1 + 0.18 * rpm) * (1 - 0.65 * M.smoothstep(25, 45, speed));
       exhL[0] = -pts.exhaust[0]; exhL[1] = pts.exhaust[1]; exhL[2] = pts.exhaust[2];
       toWorld(tW, plane, exhL);
       v3.sub(tW, tW, tP);                    // offset from the right stack to the left one

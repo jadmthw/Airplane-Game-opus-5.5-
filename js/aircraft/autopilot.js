@@ -33,6 +33,8 @@
   }
 
   var aim = v3.create(), legDir = v3.create(), rel = v3.create();
+  // returned (reset) when there is no plane to keep state on
+  var NEUTRAL = { pitch: 0, roll: 0, yaw: 0, throttle: 0, brake: 0, smoke: false };
 
   function groundAt(x, z) {
     var W = RL.World;
@@ -42,9 +44,14 @@
 
   function fly(p, target, dt, opts) {
     opts = opts || {};
+    if (!p) {
+      NEUTRAL.pitch = NEUTRAL.roll = NEUTRAL.yaw = NEUTRAL.throttle = NEUTRAL.brake = 0;
+      NEUTRAL.smoke = false;
+      return NEUTRAL;
+    }
     var s = state(p), c = s.ctl;
     c.brake = 0; c.smoke = false; c.yaw = 0;
-    if (!p || !target || p.crashed || !(dt > 0)) {
+    if (!target || p.crashed || !(dt > 0)) {
       c.pitch = 0; c.roll = 0; c.throttle = 0;
       return c;
     }
@@ -153,7 +160,8 @@
     s.iGam = M.clamp(s.iGam + eG * dt * 0.6, -0.25, 0.25);
     // desired flight-path rate -> extra load factor -> extra AoA -> stick (flight model constants)
     var cphi = Math.cos(roll);
-    var nExtra = V * (eG * 0.9) / G + Math.max(0, cphi) * V * Math.sin(gam) * Math.cos(gam) / (P.pathReturn * G);
+    // (+ cancel the flight model's own return-to-level term, which the stick has to hold off)
+    var nExtra = V * (eG * 0.9) / G + cphi * V * Math.sin(gam) * Math.max(Math.cos(gam), 0.5) / (P.pathReturn * G);
     var qS = 0.5 * 1.225 * V * V * P.wingArea;
     var dAlpha = nExtra * P.weight / Math.max(qS * P.clAlpha, 1);
     var perStick = P.kElev / P.kAlpha;

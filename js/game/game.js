@@ -43,6 +43,8 @@
 
   var CRASH_TEXT = {
     terrain: ['You met the mountain', 'Watch the PULL UP cue: it looks a few seconds ahead of you.'],
+    groundHit: ['Flew into the ground', 'Watch the PULL UP cue: it looks a few seconds ahead of you.'],
+    climbStall: ['Stalled on climb-out', 'Too much nose-up: hold about 10 degrees and let the speed build before climbing harder.'],
     water: ['Splashdown', 'Mirror Lake is for skimming, not swimming. Keep 5 m over the water.'],
     building: ['Hangar rash', 'Buildings are harder than they look. Taxi on the paved areas.'],
     arch: ['The arch won', 'Aim for the violet ring: it marks the widest part of the opening.'],
@@ -64,6 +66,9 @@
   // rotation history sampled every 0.1 s: 6 s window for rolls, 14 s for loops
   var ROLL_SAMPLES = 150, ROLL_WINDOW = 60, LOOP_WINDOW = 140;
   var rollBuf = new Float32Array(ROLL_SAMPLES), pitchBuf = new Float32Array(ROLL_SAMPLES);
+  // per-sample extremes, so a loop must really go over the top (a steep turn also piles up
+  // body-axis pitch rotation, but never points the nose up or turns the aircraft over)
+  var pitchMaxBuf = new Float32Array(ROLL_SAMPLES), upMinBuf = new Float32Array(ROLL_SAMPLES);
 
   // ------------------------------------------------------------------ helpers
   function emit(type, data) { if (RL.Events) RL.Events.emit(type, data); }
@@ -100,10 +105,9 @@
 
   function formatTime(t) {
     if (!(t >= 0)) return '--:--.-';
-    var m = Math.floor(t / 60), s = t - m * 60;
-    var ss = s.toFixed(1);
-    if (s < 10) ss = '0' + ss;
-    return m + ':' + ss;
+    // round once to tenths, then split, so 59.97 s carries into the minutes ('1:00.0')
+    var d = Math.round(t * 10), m = Math.floor(d / 600), s = (d - m * 600) / 10;
+    return m + ':' + (s < 10 ? '0' : '') + s.toFixed(1);
   }
 
   // ------------------------------------------------------------------ state
@@ -175,6 +179,7 @@
     lastPlaneTime = 0;
     if (RL.Input && RL.Input.setThrottle) RL.Input.setThrottle(0);
     Game.state = 'playing';
+    closeHelp();
     emit('gameStart', {});
   }
 
@@ -187,9 +192,16 @@
     lastPlaneTime = 0;
     if (RL.Input && RL.Input.setThrottle) RL.Input.setThrottle(0);
     Game.state = 'playing';
+    closeHelp();
     emit('respawn', {});
     if (reason === 'bounds') message('Too far from home: back at Ridgeline Field', 'warn', 3);
     if (was === 'paused' && RL.Input && RL.Input.requestPointerLock) RL.Input.requestPointerLock();
+  }
+
+  // Starting or respawning must never leave the help overlay over live flight. Called after the
+  // state is already 'playing', so toggleHelp only closes the panel (no pause/resume side effects).
+  function closeHelp() {
+    if (RL.UI && RL.UI.helpOpen && RL.UI.toggleHelp) RL.UI.toggleHelp();
   }
 
   function resetFlight() {
@@ -226,7 +238,10 @@
       canyon: { active: false, sMin: 0, sMax: 0, grace: 0, done: false },
       thermal: { inside: false, base: 0, grace: 0 },
       pullUpHold: 0,
-      landingHintShown: false, brakeHintShown: false
+      pitchMaxS: -90, upMinS: 1, prevHdg: Game.plane ? fin(Game.plane.heading, 0) : 0, hdgRate: 0,
+      liftoffAt: -1e9,                  // far past: teleported approaches still get landing coaching
+      stalledSinceLiftoff: false,
+      landingHintShown: false, brakeHintShown: false, steerHintShown: false
     };
     if (Game.plane) v3.copy(framePrev, Game.plane.pos);
   }
@@ -280,7 +295,8 @@
     var p = Game.plane, FM = RL.FlightModel, s = Game.state;
     switch (name) {
       case 'start':
-        if (s === 'title') start();
+        // Enter on the title with help open just closes help (the player was reading it)
+        if (s === 'title') { if (RL.UI && RL.UI.helpOpen && RL.UI.toggleHelp) RL.UI.toggleHelp(); else start(); }
         else if (s === 'paused') setPaused(false);
         else if (s === 'crashed' && Game.crash.ready) respawn();
         else if (s === 'playing' && Game.results && !Game.results.dismissed) dismissResults();
@@ -512,6 +528,8 @@
       switch (ev.type) {
         case 'liftoff':
           emit('liftoff', { speed: fin(ev.speed, p.airspeed), label: 'Liftoff' });
+          st.liftoffAt = Game.flightTime;
+          st.stalledSinceLiftoff = false;
           if (pendingTD) {
             if (pendingTD.roll > 0.8) finishLanding(true);
             else pendingTD = null;
@@ -520,8 +538,11 @@
           break;
         case 'touchdown':
           var vs = fin(ev.verticalSpeed, 0);
+          // The flight model reports the offset east of the centreline; the landing banner wants it
+          // as the pilot sees it, which flips when landing south on runway 18.
           pendingTD = {
-            verticalSpeed: vs, centerlineOffset: fin(ev.centerlineOffset, 0),
+            verticalSpeed: vs,
+            centerlineOffset: fin(ev.centerlineOffset, 0) * (p.forward && p.forward[2] > 0 ? -1 : 1),
             headingError: fin(ev.headingError, 0), onRunway: !!ev.onRunway,
             surface: ev.surface || 'grass', bounced: false, roll: 0
           };
@@ -540,6 +561,7 @@
           onCrash(ev.reason || 'terrain', fin(ev.speed, v3.length(prevVel)));
           return;                       // nothing after a crash matters
         case 'stall':
+          st.stalledSinceLiftoff = true;
           emit('stall', { active: true });
           break;
         case 'stallRecover':
@@ -552,6 +574,16 @@
   function onCrash(reason, speed) {
     var p = Game.plane;
     var txt = CRASH_TEXT[reason] || CRASH_TEXT.terrain;
+    var W = world();
+    if (reason === 'terrain' && W && W.normalAt) {
+      // flat valley floor, not a mountainside: say so
+      var n = W.normalAt(p.pos[0], p.pos[2], tA);
+      if (n && n[1] > 0.93 && p.pos[1] < 400) txt = CRASH_TEXT.groundHit;
+    }
+    if ((reason === 'hardLanding' || reason === 'terrain') && st && st.stalledSinceLiftoff &&
+        Game.flightTime - st.liftoffAt < 15) {
+      txt = CRASH_TEXT.climbStall;           // the real lesson is the over-rotation, not the flare
+    }
     Game.state = 'crashed';
     Game.crash.reason = reason;
     Game.crash.label = txt[0];
@@ -671,17 +703,23 @@
       st.rollCum += wr * dt;
       st.pitchCum += wp * dt;
     }
+    st.pitchMaxS = Math.max(st.pitchMaxS, fin(p.pitch, 0));
+    st.upMinS = Math.min(st.upMinS, fin(p.up[1], 1));
     st.sampleT += dt;
     if (st.sampleT >= 0.1) {
       st.sampleT = 0;
       st.head = (st.head + 1) % ROLL_SAMPLES;
       rollBuf[st.head] = st.rollCum;
       pitchBuf[st.head] = st.pitchCum;
+      pitchMaxBuf[st.head] = st.pitchMaxS;
+      upMinBuf[st.head] = st.upMinS;
+      st.pitchMaxS = -90; st.upMinS = 1;
       st.nSamples = Math.min(ROLL_SAMPLES, st.nSamples + 1);
     }
     if (airborne && agl > 8) {
-      // barrel roll: 360 deg of roll within 6 s; loop: 360 deg of pitch within 14 s
-      var nS = Math.min(st.nSamples, LOOP_WINDOW), maxDR = 0, maxDP = 0;
+      // barrel roll: 360 deg of roll within 6 s; loop: 360 deg of pitch within 14 s that also
+      // went nose-up past 65 deg and over the top (inverted) somewhere in that window
+      var nS = Math.min(st.nSamples, LOOP_WINDOW), maxDR = 0, maxDP = 0, winPitch = -90, winUp = 1;
       for (var i = 0; i < nS; i++) {
         var idx = (st.head - i + ROLL_SAMPLES) % ROLL_SAMPLES;
         if (i < ROLL_WINDOW) {
@@ -690,11 +728,13 @@
         }
         var dp = Math.abs(st.pitchCum - pitchBuf[idx]);
         if (dp > maxDP) maxDP = dp;
+        if (pitchMaxBuf[idx] > winPitch) winPitch = pitchMaxBuf[idx];
+        if (upMinBuf[idx] < winUp) winUp = upMinBuf[idx];
       }
       if (maxDR >= 350 && !(cooldown.barrelRoll > 0)) {
         awardStunt('barrelRoll');
         clearRotationHistory();
-      } else if (maxDP >= 340 && maxDR < 200 && !(cooldown.loop > 0)) {
+      } else if (maxDP >= 340 && maxDR < 200 && winPitch > 65 && winUp < -0.4 && !(cooldown.loop > 0)) {
         awardStunt('loop');
         clearRotationHistory();
       }
@@ -705,7 +745,14 @@
     // ---- inverted flight (3 s) and knife edge (2.5 s)
     st.inverted = (airborne && agl > 20 && absRoll > 150 && Math.abs(p.pitch) < 35) ? st.inverted + dt : 0;
     if (st.inverted >= 3) { awardStunt('inverted'); st.inverted = -30; }
-    var knife = airborne && agl > 20 && absRoll > 72 && absRoll < 108 && Math.abs(p.pitch) < 30 && spd > 35;
+    // Knife edge is flying on the side, not turning: a steep banked turn has the same roll angle
+    // but swings the heading round at 30+ deg/s, while a real knife edge barely changes it.
+    var hdgNow = fin(p.heading, 0);
+    var hdgStep = Math.abs(M.wrapPi((hdgNow - st.prevHdg) * M.DEG)) * M.RAD / Math.max(dt, 1e-3);
+    st.prevHdg = hdgNow;
+    st.hdgRate = M.damp(st.hdgRate, Math.min(hdgStep, 360), 4, dt);
+    var knife = airborne && agl > 20 && absRoll > 72 && absRoll < 108 && Math.abs(p.pitch) < 30 && spd > 35 &&
+      st.hdgRate < 10;
     st.knife = knife ? st.knife + dt : 0;
     if (st.knife >= 2.5) { awardStunt('knifeEdge'); st.knife = -30; }
 
@@ -791,7 +838,8 @@
 
   function clearRotationHistory() {
     st.rollCum = 0; st.pitchCum = 0; st.nSamples = 0;
-    for (var i = 0; i < ROLL_SAMPLES; i++) { rollBuf[i] = 0; pitchBuf[i] = 0; }
+    st.pitchMaxS = -90; st.upMinS = 1;
+    for (var i = 0; i < ROLL_SAMPLES; i++) { rollBuf[i] = 0; pitchBuf[i] = 0; pitchMaxBuf[i] = -90; upMinBuf[i] = 1; }
   }
 
   // ------------------------------------------------------------------ warnings
@@ -799,7 +847,13 @@
     var p = Game.plane, w = Game.warnings, specs = (RL.FlightModel && RL.FlightModel.specs) || {};
     var airborne = !p.onGround && !p.crashed;
     var spd = fin(p.airspeed, 0), agl = fin(p.agl, 0);
-    w.stall = airborne && (p.stall || fin(p.stallWarning, 0) > 0.65) && agl > 2;
+    // While the soft AoA limiter is holding the aircraft (riding the buffet in a hard pull) the
+    // stall is being prevented, so only the horn/buffet speak; the red box is for a real stall
+    // or an unprotected approach to one.
+    var protect = fin(p.stallProtect, 0);
+    w.stall = airborne && agl > 2 && (p.stall || (fin(p.stallWarning, 0) > 0.65 && protect < 0.5));
+    // remember a nose-high moment (stalled, or held at the AoA limit) for the crash advice
+    if (airborne && (p.stall || fin(p.stallWarning, 0) > 0.65)) st.stalledSinceLiftoff = true;
     w.overspeed = spd > fin(specs.vNeverExceed, 108) * 0.96;
     w.gear = airborne && !p.gearDown && agl < 70 && spd < 42 && p.verticalSpeed < 0.5;
 
@@ -808,10 +862,13 @@
     if (airborne && agl > 2 && W) {
       var approach = p.gearDown && C.isOnRunway(p.pos[0], p.pos[2], 700) && p.verticalSpeed > -6;
       if (!approach) {
+        // Level or climbing flight keeps a margin relative to the current height, so a deliberate
+        // low pass or lake skim stays quiet while rising ground ahead still triggers.
+        var margin = p.verticalSpeed >= -1 ? Math.min(6, agl * 0.5) : 6;
         for (var k = 1; k <= 3 && !danger; k++) {
           var t = k * 1.5;
           var x = p.pos[0] + p.vel[0] * t, y = p.pos[1] + p.vel[1] * t, z = p.pos[2] + p.vel[2] * t;
-          if (y < W.surfaceHeightAt(x, z) + 6) danger = true;
+          if (y < W.surfaceHeightAt(x, z) + margin) danger = true;
         }
         if (agl < 40 && p.verticalSpeed < -agl * 0.35 && p.verticalSpeed < -4) danger = true;
       }
@@ -850,11 +907,38 @@
     if (Game.hint.id === id) hideHint();
   }
 
-  // Tutorial steps: [id, text, when to show, when done, timed seconds (0 = until done)]
+  // Is the mouse actually flying the aircraft right now (captured, or the no-lock fallback)?
+  function mouseFlying() {
+    var I = RL.Input;
+    return !!(I && I.mouseFlight !== false && (I.pointerLocked || I.pointerFallback));
+  }
+  function centerlineOffset(p) { return Math.abs(p.pos[0] - C.airfield.runway.cx); }
+
+  // Rotation: a keyboard pilot who holds the pitch key over-rotates and stalls, so say "tap" and
+  // give the target attitude (the HUD ladder's 10 degree rung). Mouse wording follows the invert
+  // setting and is only offered when the mouse is really flying.
+  function rotateText() {
+    var I = RL.Input || {};
+    if (!mouseFlying()) return 'At 60 kt tap [↓] to lift the nose to about 10°, then let go and let her climb';
+    var dir = I.settings && I.settings.invertPitch ? 'forward' : 'back';
+    return 'At 60 kt ease the mouse ' + dir + ' (or tap [↓]): nose up about 10°, then let her climb';
+  }
+  function steerText() {
+    return 'Keep her on the centreline: steer with [A] / [D]' + (mouseFlying() ? ' or the mouse' : '');
+  }
+
+  // Tutorial steps: [id, text (string or function), when to show, when done, timed seconds
+  // (0 = until done)]. Steps run in order, so every step must eventually resolve.
   var TUTORIAL = [
     ['throttle', 'Throttle up: hold [W] or roll the mouse wheel forward',
       function (p) { return p.onGround; }, function (p) { return p.throttle > 0.85 || p.airspeed > 20; }, 0],
-    ['rotate', 'At 60 kt pull back gently: move the mouse down or hold [↓]',
+    // shown early in every first takeoff roll (crosswind and torque drift an unsteered aircraft
+    // towards the runway edge, and nothing else teaches A / D), gone once the player steers or
+    // lifts off; timed, so it can never hold up the rotate step
+    ['steer', steerText,
+      function (p) { return p.onGround && p.groundSpeed > 5 && (p.airspeed * KT > 22 || centerlineOffset(p) > 4); },
+      function (p, c) { return !p.onGround || (c && Math.abs(fin(c.yaw, 0)) > 0.3); }, 5],
+    ['rotate', rotateText,
       function (p) { return p.onGround && p.airspeed * KT > 40; }, function (p) { return !p.onGround && p.agl > 3; }, 0],
     ['gear', 'Positive climb: raise the gear with [G]',
       function (p) { return !p.onGround && p.agl > 12 && p.gearDown; }, function (p) { return !p.gearDown; }, 9],
@@ -883,9 +967,16 @@
         if (hintDone[s[0]]) continue;
         if (s[3] && s[3](p, controls)) { completeHint(s[0]); continue; }
         if (h.text && h.id !== s[0]) break;          // another hint is up: wait
-        if (!h.text && s[2](p, controls)) showHint(s[0], s[1], s[4]);
+        if (!h.text && s[2](p, controls)) showHint(s[0], typeof s[1] === 'function' ? s[1](p, controls) : s[1], s[4]);
         break;
       }
+    }
+    // every flight, once: drifting towards the runway edge on the takeoff/landing roll
+    if (!st.steerHintShown && !h.text && p.onGround && p.groundSpeed > 8 &&
+        C.isOnRunway(p.pos[0], p.pos[2], 0) && centerlineOffset(p) > 11 &&
+        !(controls && Math.abs(fin(controls.yaw, 0)) > 0.3)) {
+      st.steerHintShown = true;
+      showHint('steerEdge', steerText(), 5);
     }
     // landing coaching (every flight, once): lined up with the runway and going down
     if (!st.landingHintShown && !h.text && !p.onGround) {
@@ -895,7 +986,12 @@
       var hdgErr = Math.abs(M.wrapPi(fin(p.heading, 0) * M.DEG) * M.RAD);
       hdgErr = Math.min(hdgErr, 180 - hdgErr);
       var dirty = p.airspeed * KT > 85 || !p.gearDown || p.flapsNotch < 2;
-      if (dist < 3000 && Math.abs(dx) < 400 && p.agl < 300 && hdgErr < 30 && p.verticalSpeed < -1 && dirty &&
+      // not the post-rotation settle (that looks just like an approach), and only when closing
+      // on the field rather than departing it
+      var sinceLiftoff = Game.flightTime - st.liftoffAt;
+      var closing = -dx * p.vel[0] - dz * p.vel[2] > 0;
+      if (sinceLiftoff > 25 && closing &&
+          dist < 3000 && Math.abs(dx) < 400 && p.agl < 300 && hdgErr < 30 && p.verticalSpeed < -1 && dirty &&
           (Game.course.state === 'done' || !tutorialDone)) {
         st.landingHintShown = true;
         showHint('landing', 'To land: slow below 80 kt, flaps [F] twice, gear down [G], flare just above the runway', 9);

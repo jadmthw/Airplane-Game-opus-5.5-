@@ -201,6 +201,7 @@
 .rl-chips { display: flex; gap: 4px; flex-wrap: wrap; }
 .rl-chip { padding: 5px 9px; font-size: 12px; border-radius: 8px; letter-spacing: 0.02em; }
 .rl-chip.on { background: rgba(244, 185, 66, 0.2); border-color: var(--rl-accent); color: #ffe2a0; }
+.rl-opt-note { margin-left: 6px; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--rl-muted); }
 .rl-switch { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
 .rl-switch-ui {
   position: relative;
