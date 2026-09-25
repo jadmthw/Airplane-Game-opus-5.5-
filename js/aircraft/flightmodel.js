@@ -89,6 +89,7 @@
   var NOSE_FIRST = 2.2;                  // m/s sink on the nose wheel alone -> nose strike
   var WING_STRIKE_ROLL = 25;             // deg
   var MAX_SUBSTEP = 1 / 110;
+  var BOUNDS_MARGIN = 4000;               // m past the terrain edge (the Game handles the soft edge)
 
   function clCurve(a, flaps, out) {
     // Lift coefficient over the full +-180 deg range: linear up to the critical AoA, a smooth
@@ -510,6 +511,12 @@
       v3.scaleAndAdd(force, force, fwdG, -N * P.muRollSpeed * vLong);
     }
     p.wheelsOnGround = wheels;
+
+    // ---- leaving the map (the Game may warn earlier; this is the hard edge)
+    if (W && W.outOfBounds && W.outOfBounds(pos[0], pos[2]) > BOUNDS_MARGIN) {
+      crash(p, events, 'bounds', v3.length(vel));
+      return;
+    }
 
     // ---- hard points: terrain, water, colliders
     var skid = false;

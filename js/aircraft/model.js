@@ -316,12 +316,22 @@
   function buildPanel() {
     // cockpit-view only: dark tub over the fuselage skin, glare shield, instrument panel
     var g = newGeo();
-    var tub = RL.Geo.box(0.7, 0.06, 1.25, [0.16, 0.16, 0.18]);
+    var tub = RL.Geo.box(0.62, 0.06, 1.25, [0.22, 0.18, 0.15]);
     RL.Geo.translate(tub, 0, 0.555, 0.08);
-    append(g, flat(tub, [0.16, 0.16, 0.18], 0));
-    var glare = RL.Geo.box(0.7, 0.05, 0.26, COL.panel);
-    RL.Geo.translate(glare, 0, 0.59, -0.66);
+    append(g, flat(tub, [0.22, 0.18, 0.15], 0));
+    // rounded coaming over the panel (half cylinder across the cockpit)
+    var glare = RL.Geo.cylinder(0.1, 0.1, 0.66, 8, COL.panel, { thetaStart: -Math.PI / 2, thetaLength: Math.PI });
+    RL.Geo.rotateZ(glare, Math.PI / 2);
+    RL.Geo.scale(glare, 1, 0.8, 1.6);
+    RL.Geo.translate(glare, 0, 0.53, -0.66);
     append(g, flat(glare, COL.panel, 0));
+    // little whisky compass on the coaming
+    var comp = RL.Geo.cylinder(0.04, 0.045, 0.06, 10, [0.06, 0.06, 0.07]);
+    RL.Geo.translate(comp, 0, 0.64, -0.64);
+    append(g, flat(comp, [0.06, 0.06, 0.07], 0));
+    var lub = RL.Geo.box(0.006, 0.03, 0.006, [1, 1, 1]);
+    RL.Geo.translate(lub, 0, 0.645, -0.6);
+    append(g, flat(lub, [1, 1, 1], 0));
     var face = RL.Geo.box(0.68, 0.2, 0.04, COL.panel);
     RL.Geo.translate(face, 0, 0.49, -0.55);
     append(g, flat(face, COL.panel, 0));
@@ -721,7 +731,7 @@
     '  float r2 = dot(v_q, v_q);',
     '  if (r2 > 1.0) discard;',
     '  float core = exp(-r2 * 18.0);',
-    '  float halo = exp(-r2 * 4.0) * 0.35;',
+    '  float halo = exp(-r2 * 5.0) * 0.18;',
     '  vec3 c = v_col.rgb * v_col.a * (core * 2.0 + halo) * v_fade;',
     '  c += vec3(1.0) * v_col.a * exp(-r2 * 60.0) * v_fade;',        // white-hot centre
     '  vec3 outc = acesTonemap(c * u_exposure);',
@@ -987,25 +997,25 @@
     var dayDim = M.lerp(0.18, 1.0, night);
     var t = frame.time || 0;
     var i = 0;
-    i = pushGlow(i, LIGHTS.left, 0.35 + 0.35 * night, 1.0, 0.12, 0.08, 1.4 * dayDim);
-    i = pushGlow(i, LIGHTS.right, 0.35 + 0.35 * night, 0.1, 1.0, 0.3, 1.4 * dayDim);
-    i = pushGlow(i, LIGHTS.tail, 0.3 + 0.3 * night, 1.0, 0.95, 0.85, 1.1 * dayDim);
+    i = pushGlow(i, LIGHTS.left, 0.22 + 0.2 * night, 1.0, 0.12, 0.08, 1.3 * dayDim);
+    i = pushGlow(i, LIGHTS.right, 0.22 + 0.2 * night, 0.1, 1.0, 0.3, 1.3 * dayDim);
+    i = pushGlow(i, LIGHTS.tail, 0.18 + 0.17 * night, 1.0, 0.95, 0.85, 1.0 * dayDim);
     // strobes: double flash every 1.3 s
     var ph = t % 1.3;
     var flash = (ph < 0.05 || (ph > 0.14 && ph < 0.19)) ? 1 : 0;
     if (flash) {
-      i = pushGlow(i, LIGHTS.strobeL, 1.1 + 1.3 * night, 1, 1, 1, 3.0 * M.lerp(0.5, 1, night));
-      i = pushGlow(i, LIGHTS.strobeR, 1.1 + 1.3 * night, 1, 1, 1, 3.0 * M.lerp(0.5, 1, night));
+      i = pushGlow(i, LIGHTS.strobeL, 0.5 + 0.7 * night, 1, 1, 1, 2.6 * M.lerp(0.5, 1, night));
+      i = pushGlow(i, LIGHTS.strobeR, 0.5 + 0.7 * night, 1, 1, 1, 2.6 * M.lerp(0.5, 1, night));
     }
     // red anti-collision beacons, alternating top / belly at ~1 Hz
     var bp = (t * 1.1) % 1;
     var bI = Math.max(0, Math.sin(bp * Math.PI * 2)) * 2.2;
     var bJ = Math.max(0, -Math.sin(bp * Math.PI * 2)) * 2.2;
-    if (bI > 0.05) i = pushGlow(i, LIGHTS.beaconTop, 0.5 + 0.6 * night, 1.0, 0.1, 0.05, bI * dayDim);
-    if (bJ > 0.05) i = pushGlow(i, LIGHTS.beaconBelly, 0.5 + 0.6 * night, 1.0, 0.1, 0.05, bJ * dayDim);
+    if (bI > 0.05) i = pushGlow(i, LIGHTS.beaconTop, 0.25 + 0.3 * night, 1.0, 0.1, 0.05, bI * dayDim);
+    if (bJ > 0.05) i = pushGlow(i, LIGHTS.beaconBelly, 0.25 + 0.3 * night, 1.0, 0.1, 0.05, bJ * dayDim);
     // landing light lens glow
     var L = Aircraft.getLandingLight(plane, night);
-    if (L.intensity > 0.01 && !opts.cockpit) i = pushGlow(i, LIGHTS.landing, 0.9, 1.0, 0.95, 0.85, 2.0 * M.saturate(L.intensity / 6));
+    if (L.intensity > 0.01 && !opts.cockpit) i = pushGlow(i, LIGHTS.landing, 0.35, 1.0, 0.95, 0.85, 1.6 * M.saturate(L.intensity / 6));
     return i;
   }
 
